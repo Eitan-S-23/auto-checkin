@@ -1,9 +1,6 @@
-name: NodeSeek 自动签到评论加鸡腿
+name: daily-checkin (NodeSeek/DeepFlood/linux.sb)
 
 on:
-  push:
-    branches:
-      - main
   # 支持在 Actions 页面手动触发，便于验证配置是否生效
   workflow_dispatch:
     inputs:
@@ -41,10 +38,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-      
+        uses: actions/checkout@v4
+
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11.8'
 
@@ -63,7 +60,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r nodeseek/requirements.txt
 
       - name: Run NodeSeek script
         env:
@@ -75,11 +72,10 @@ jobs:
           # 除签到外的任务（评论、加鸡腿）总开关，未配置时默认关闭
           NS_EXTRA_TASKS: ${{ vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS }}
           # deepflood 子站 cookie（可选，配置后两站顺序签到，中间自动随机延迟）
-          # 注意 secret 名是 DEEPFLOOD_COOKIE（DEEP），须与拼写完全一致，
-          # 之前曾误写为 DEPFLOOD_COOKIE 导致取不到值。
+          # 注意 secret 名是 DEEPFLOOD_COOKIE（DEEP），须与拼写完全一致。
           DEEPFLOOD_COOKIE: ${{ secrets.DEEPFLOOD_COOKIE }}
         run: |
-          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek_daily.py
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek/nodeseek_daily.py
 
       # linux.sb（烧饼社区）2026-08 起会间歇性开启 Cloudflare 托管挑战：命中时
       # 非浏览器客户端收到 403 + Cf-Mitigated: challenge（本地住宅 IP、补全浏览器
@@ -97,8 +93,8 @@ jobs:
           # 有头模式 + xvfb 虚拟显示（与 NodeSeek 步骤同配比），浏览器登录更稳定
           HEADLESS: "false"
           # 手动触发时可勾选，跳过 requests 探测直接验证浏览器通道；
-          # 定时与 push 触发下 inputs 为空，保持 requests 快通道优先
+          # 定时触发下 inputs 为空，保持 requests 快通道优先
           LINUXSB_FORCE_BROWSER: ${{ inputs.linuxsb_force_browser && '1' || '' }}
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
-          xvfb-run -a --server-args="-screen 0 1920x1080x24" python linuxsb_daily.py
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek/linuxsb_daily.py
