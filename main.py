@@ -41,17 +41,14 @@ def sanitize_header_value(value):
     return value
 
 def generate_headers(cookie):
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
-    ]
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Encoding": "gzip, deflate, br",
         "Content-Type": "application/json;charset=UTF-8",
         "Cookie": cookie,
         "Origin": "https://glados.cloud",
-        "User-Agent": random.choice(user_agents)
+        # 固定 Windows UA：GLaDOS 会比对签到请求客户端与登录设备，随机切换到 macOS 会触发反自动化检测导致积分被拒
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
     }
     return {k: sanitize_header_value(v) for k, v in headers.items()}
 
