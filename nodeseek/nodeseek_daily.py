@@ -1,0 +1,1060 @@
+# -- coding: utf-8 --
+"""
+Copyright (c) 2024 [Hosea]
+Licensed under the MIT License.
+See LICENSE file in the project root for full license information.
+"""
+import os
+from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import random
+import re
+import shutil
+import subprocess
+import time
+import traceback
+import unicodedata
+import undetected_chromedriver as uc
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+
+import notify
+
+# 本地调试时从 .env 读取配置；GitHub Actions 环境直接使用注入的环境变量。
+# python-dotenv 缺失时静默跳过，保证已有部署无需改动即可运行。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+def env_bool(name, default=False):
+    """
+    解析布尔型环境变量，接受 true/1/yes/on/y（大小写不敏感）为真，其余为假。
+    未设置或为空时返回 default。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on", "y")
+
+
+# 不应注入的 cookie。
+# Cloudflare 的 cf_clearance / __cf_bm 与获取时的出口 IP 和 User-Agent 绑定，
+# 在 GitHub Actions 这类异地环境注入对不上的值，比不带更容易被判定为异常；
+# _ga 等统计 cookie 与登录态无关。前缀匹配以覆盖 _ga_XXXX 这类带后缀的变体。
+SKIP_COOKIE_PREFIXES = ("cf_clearance", "__cf_bm", "__cflb", "_ga", "_gid", "_gat")
+
+
+def should_skip_cookie(name):
+    """判断某个 cookie 是否应跳过注入（大小写不敏感的前缀匹配）。"""
+    lowered = name.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in SKIP_COOKIE_PREFIXES)
+
+
+# cookie 名称的合法字符集（RFC 6265 token），据此判断一段是否为新 cookie 的开头。
+# 放在模块级是因为解析与异常片段诊断都要用它。
+COOKIE_NAME_PATTERN = re.compile(r'^[A-Za-z0-9!#$%&\'*+\-.^_`|~]+$')
+COOKIE_NAME_CHAR_PATTERN = re.compile(r'[A-Za-z0-9!#$%&\'*+\-.^_`|~]')
+
+# curl 复制 cookie 时可能带上的参数名：-H 'Cookie: xxx' / --cookie "xxx" / -b xxx
+_COOKIE_FLAG_PREFIXES = ("-h", "--header", "--cookie", "-b")
+
+# 复制过程会混入的不可见字符：BOM、零宽空格、零宽非连接符/连接符。
+# cookie 名与值都限定在 ASCII token 内，这些字符只可能来自粘贴，直接清掉。
+_INVISIBLE_CHARS_PATTERN = re.compile('[\ufeff\u200b\u200c\u200d]')
+
+# 异常片段首个非法字符的类别提示，用于定位粘贴来源。只报字符类别，不报内容。
+_FRAGMENT_CHAR_HINTS = {
+    "Cf": "不可见格式字符（可能是 BOM 或零宽字符）",
+    "Pi": "引号",
+    "Pf": "引号",
+    "Po": "标点符号（可能是引号或冒号）",
+    "Zs": "空白字符",
+    "Pd": "连字符",
+    "Lo": "中文等表意文字（可能粘进了说明文字）",
+}
+
+
+def strip_cookie_wrappers(raw):
+    """
+    剥掉粘贴 cookie 时常见的包裹物，返回清洗后的 cookie 串。
+
+    覆盖：BOM、成对引号、`Cookie:` / `Set-Cookie:` 前缀、curl 的 -H/--cookie/-b 参数名。
+    这些包裹会让首个 cookie 名非法而被整条丢弃——如果丢的恰好是登录字段，
+    浏览器就会停在未登录状态，而页面上仍有"今日签到"入口文案，导致漏签被误报成已签到。
+    只做无歧义的剥离，不猜测缺失的 cookie 名。
+    """
+    text = _INVISIBLE_CHARS_PATTERN.sub('', raw).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+
+    for flag in _COOKIE_FLAG_PREFIXES:
+        lowered = text.lower()
+        if lowered.startswith(flag + " ") or lowered.startswith(flag + "="):
+            text = text[len(flag) + 1:].strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+                text = text[1:-1].strip()
+            break
+
+    for prefix in ("set-cookie:", "cookie:"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    return text
+
+
+def describe_fragment(segment):
+    """
+    描述无法归属的开头片段的形状，用于定位粘贴问题，不输出片段内容。
+
+    只报告长度、是否含等号、首个非法字符的 Unicode 类别：
+    足以区分"被引号包住""带 BOM""粘进了说明文字"等情况，
+    同时保证 cookie 值不会出现在公开仓库的 CI 日志里。
+    """
+    detail = f"长度 {len(segment)}，" + ("含等号" if '=' in segment else "不含等号")
+    for char in segment.partition('=')[0].strip():
+        if not COOKIE_NAME_CHAR_PATTERN.match(char):
+            category = unicodedata.category(char)
+            detail += f"，首个非法字符：{_FRAGMENT_CHAR_HINTS.get(category, f'类别 {category}')}"
+            break
+    return detail
+
+
+def parse_cookie_string(raw):
+    """
+    解析 NS_COOKIE 字符串，返回 (待注入的 (name, value) 列表, 跳过原因列表)。
+
+    只在名称合法的分号处切分：cookie 值本身可能含分号（例如被截断的 JSON），
+    若无条件按分号切分会把一个 cookie 拆成两半，产生不含 = 号的残缺片段。
+    因此逐段判断——某段不含 = 号或等号左侧不像合法 cookie 名时，
+    视为上一个 cookie 值的延续并拼回去。
+    同时把换行当作分隔符，便于 secret 多行粘贴。
+    进入切分前先交给 strip_cookie_wrappers 剥掉 BOM、引号、Cookie: 前缀、
+    curl 参数名等复制包裹，避免首个 cookie 因名字非法被整条丢弃。
+
+    跳过原因中不含 cookie 值，可安全打印到 CI 日志。
+    """
+    pairs = []
+    skipped = []
+    if not raw:
+        return pairs, skipped
+
+    # 先剥掉复制时常见的包裹（BOM、成对引号、Cookie: 前缀、curl 参数名）：
+    # 它们会让首个 cookie 名非法而被整条丢弃，正是漏签事故的可疑成因
+    raw = strip_cookie_wrappers(raw)
+
+    for chunk in re.split(r'[;\r\n]+', raw):
+        segment = chunk.strip()
+        if not segment:
+            continue
+
+        name, sep, value = segment.partition('=')
+        is_new_cookie = bool(sep) and bool(COOKIE_NAME_PATTERN.match(name.strip()))
+
+        if is_new_cookie:
+            pairs.append([name.strip(), value.strip()])
+        elif pairs:
+            # 不像新 cookie，说明上一个 cookie 的值里含分号或换行，拼回去
+            pairs[-1][1] = f"{pairs[-1][1]};{segment}"
+        else:
+            # 开头就是异常片段，无法归属；只报告形状，不输出内容
+            skipped.append(
+                f"开头的异常片段（{describe_fragment(segment)}）："
+                f"cookie 串可能被截断或带了未识别的包裹，请重新复制完整 cookie"
+            )
+
+    result = []
+    for name, value in pairs:
+        if should_skip_cookie(name):
+            skipped.append(f"{name}（与本机环境绑定或与登录态无关）")
+            continue
+        result.append((name, value))
+
+    return result, skipped
+
+
+def cookie_has_login(site):
+    """
+    提示性检查：站点 cookie 串里是否带登录态字段 session。
+
+    只用于给失败原因提供线索（session 是 HttpOnly cookie，只在浏览器发出的请求头里
+    可见，遗漏它是粘贴不完整最常见的形态），不参与判定——是否已登录一律以页面能否
+    抓到账号概览为准，避免把 cookie 名写死成判据。
+    """
+    pairs, _ = parse_cookie_string(site.cookie)
+    return any(name.strip().lower() == "session" for name, _ in pairs)
+
+
+# 被截断的粘贴里，无名片段的长度下限。过短的片段不像凭据值，避免把垃圾注入成 session。
+MIN_ORPHAN_TOKEN_LENGTH = 8
+
+
+def orphan_login_candidate(site):
+    """
+    取 cookie 串开头的无名片段，作为"被截掉名字的登录凭据"候选；无此形态时返回 None。
+
+    粘贴被从头截断时（2026-09-30 事故的真实形态：开头 32 字符没有 cookie 名，
+    colorscheme/hmti_/session 三条整体丢失），残留片段往往正是被截掉名字的 session 值。
+    直接丢弃会让浏览器停在未登录状态，所以这里把它交给调用方试注入。
+
+    只做候选不直接采信：注入后由页面的账号概览验真伪，验不过仍按失败处理。
+    返回值含凭据内容，调用方不得写进日志（日志只能用 describe_fragment 描述形状）。
+    """
+    raw = strip_cookie_wrappers(site.cookie)
+    if not raw:
+        return None
+
+    first = re.split(r'[;\r\n]+', raw, maxsplit=1)[0].strip()
+    if not first or len(first) < MIN_ORPHAN_TOKEN_LENGTH:
+        return None
+    # cookie 值里不会有空白，出现空白说明片段是说明文字之类的垃圾
+    if any(char.isspace() for char in first):
+        return None
+
+    name, sep, _ = first.partition('=')
+    if sep and COOKIE_NAME_PATTERN.match(name.strip()):
+        # 开头就是合法 cookie，说明粘贴没被从头截断
+        return None
+    return first
+
+
+def parse_chrome_major_version(version_output):
+    """
+    从 `chrome --version` 的输出中解析大版本号。
+    输入形如 "Google Chrome 150.0.7871.128"，返回 150；无法解析时返回 None。
+    """
+    if not version_output:
+        return None
+    match = re.search(r'(\d+)\.\d+\.\d+', version_output)
+    return int(match.group(1)) if match else None
+
+
+def detect_chrome_major_version():
+    """
+    探测本机已安装 Chrome 的大版本号，用于让驱动版本与浏览器保持一致。
+    允许通过 CHROME_MAJOR_VERSION 直接指定，便于在版本探测失败时人工兜底。
+    探测失败返回 None，由调用方回退到自动匹配。
+    """
+    override = os.environ.get("CHROME_MAJOR_VERSION", "").strip()
+    if override.isdigit():
+        return int(override)
+
+    for binary in ("google-chrome", "chromium-browser", "chromium", "chrome"):
+        executable = shutil.which(binary)
+        if not executable:
+            continue
+        try:
+            output = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            ).stdout
+        except Exception as e:
+            print(f"探测 {binary} 版本失败: {str(e)}")
+            continue
+
+        version = parse_chrome_major_version(output)
+        if version:
+            return version
+
+    return None
+
+
+ns_random = env_bool("NS_RANDOM")
+cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
+# 通过环境变量控制是否使用无头模式，默认为 True（无头模式）
+headless = env_bool("HEADLESS", default=True)
+# 除签到外的任务（评论、加鸡腿）总开关，默认关闭。
+# 这些操作有被举报禁言的风险，需显式设置 NS_EXTRA_TASKS=true 才执行。
+extra_tasks_enabled = env_bool("NS_EXTRA_TASKS")
+
+randomInputStr = ["bd","绑定","帮顶"]
+
+# Cloudflare 挑战页（"Just a moment..." 5 秒盾）的特征。
+# 命中任一即说明当前页面不是论坛正文，此时任何元素定位都必然超时。
+CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browser-verification")
+
+# 签到页相对路径（各站相同，因为 deepflood 与 nodeseek 同一套代码）。
+# 注意 signIn.html 是登录/注册页，不是签到页——二者字面相近容易混淆，
+# 直连 signIn 会被站点判定为需要登录。签到入口实际在 /board。
+SIGN_PATH = '/board'
+
+
+class Site:
+    """
+    单个签到站点配置。
+
+    nodeseek 与其子站 deepflood 同一套代码、同样的页面结构，区别只在域名和 cookie。
+    把站点抽象出来，避免域名/cookie 散落硬编码，多站点可顺序签到。
+    """
+
+    def __init__(self, name, domain, cookie):
+        self.name = name          # 用于日志与通知标题，如 "NodeSeek" / "DeepFlood"
+        self.domain = domain      # 不含协议，如 nodeseek.com
+        self.cookie = cookie      # 原始 cookie 字符串，形如 "session=xxx; pjwt=yyy"
+        self.base = f"https://www.{domain}"
+
+    @property
+    def home_url(self):
+        return self.base
+
+    @property
+    def sign_url(self):
+        return f"{self.base}{SIGN_PATH}"
+
+    @property
+    def trade_url(self):
+        return f"{self.base}/categories/trade"
+
+
+def load_sites():
+    """
+    从环境变量加载要签到的站点列表，至少返回 nodeseek。
+
+    NS_COOKIE: nodeseek 的 cookie（向后兼容，老配置无需改动）
+    DEEPFLOOD_COOKIE: deepflood 子站的 cookie，配置后才会加入第二站
+
+    若两站都配置则顺序签到，中间加随机延迟避免被判定为机器批量行为。
+    """
+    sites = []
+    ns_cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
+    if ns_cookie:
+        sites.append(Site("NodeSeek", "nodeseek.com", ns_cookie))
+
+    df_cookie = os.environ.get("DEEPFLOOD_COOKIE")
+    if df_cookie:
+        sites.append(Site("DeepFlood", "deepflood.com", df_cookie))
+
+    if not sites:
+        print("未配置任何站点 cookie（至少需要 NS_COOKIE）")
+    # 打印站点数与各 cookie 长度（不含值），便于确认 secret 是否真正生效
+    print(f"加载到 {len(sites)} 个站点: " + ", ".join(
+        f"{s.name}(cookie长度{len(s.cookie)})" for s in sites))
+    return sites
+
+
+def _env_int(name, default):
+    """读取整数型环境变量，空串与未设置同样视为缺失，回退到 default。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        print(f"环境变量 {name} 不是合法整数: {raw!r}，使用默认 {default}")
+        return default
+
+
+# 两站签到之间的随机延迟范围（秒），降低被风控判为批量行为的概率
+SITE_GAP_MIN = _env_int("SITE_GAP_MIN", 60)
+SITE_GAP_MAX = _env_int("SITE_GAP_MAX", 180)
+if SITE_GAP_MIN > SITE_GAP_MAX:
+    # 配置颠倒时纠正，避免 random.randint 抛 ValueError
+    print(f"SITE_GAP_MIN({SITE_GAP_MIN}) > SITE_GAP_MAX({SITE_GAP_MAX})，已互换")
+    SITE_GAP_MIN, SITE_GAP_MAX = SITE_GAP_MAX, SITE_GAP_MIN
+
+
+# 页面已签到的收尾文案特征，只认"签到完成后才会出现"的措辞。
+# 不能再用「今日签到」「已签到」这类泛化词：签到页在未签到时同样会渲染这些入口
+# 文案，2026-09-30 实测——cookie 丢了 session 导致浏览器处于未登录态，按钮定位
+# 失败后正是被这些泛化词误判成"今日已签到"，两站整天静默漏签。
+# 收益句（"今日签到获得鸡腿x个"）另由下面的 SIGNED_REWARD_PATTERN 识别。
+SIGNED_MARKERS = ("明天再来", "明日再来", "请明天")
+
+# 已签到的收益句：把"签到"与"获得/领取/奖励"绑在同一句内，并要求收益带具体数字。
+# 另外排除"可获得/能获得"这类未然措辞，否则未签到页面上的
+# "每日签到可获得 5 个鸡腿"推广文案会被误判成"今日已签到"。
+SIGNED_REWARD_PATTERN = re.compile(
+    r'签到(?![^。；;]{0,6}(?:可|能|将|会))[^。；;]{0,6}(?:获得|领取|奖励)[^。；;]{0,12}\d+\s*个?\s*鸡腿'
+    r'|签到(?![^。；;]{0,6}(?:可|能|将|会))[^。；;]{0,6}(?:获得|领取|奖励)[^。；;]{0,12}鸡腿\s*\d+\s*个?'
+)
+
+
+def is_cloudflare_challenge(driver):
+    """判断当前页面是否停留在 Cloudflare 挑战页。"""
+    try:
+        title = (driver.title or "").lower()
+        if any(marker in title for marker in CF_CHALLENGE_MARKERS):
+            return True
+        # 挑战页体积很小，只截取头部即可判断，避免拉取整页源码
+        head = (driver.page_source or "")[:3000].lower()
+        return any(marker in head for marker in CF_CHALLENGE_MARKERS)
+    except Exception as e:
+        print(f"检测 Cloudflare 挑战页失败: {str(e)}")
+        return False
+
+
+def wait_for_cloudflare(driver, timeout=60):
+    """
+    等待 Cloudflare 挑战自行通过。
+    undetected-chromedriver 通常能自动过盾，但需要给它时间；
+    这里轮询直到页面不再是挑战页，超时返回 False 由调用方决定如何处理。
+    """
+    if not is_cloudflare_challenge(driver):
+        return True
+
+    print(f"检测到 Cloudflare 挑战页，最多等待 {timeout} 秒...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        if not is_cloudflare_challenge(driver):
+            print("Cloudflare 挑战已通过")
+            return True
+
+    print("Cloudflare 挑战在超时内未通过")
+    return False
+
+
+def extract_sign_reward(driver):
+    """
+    从签到页面文本中提取鸡腿收益描述，用于通知正文。
+
+    签到成功与已签到都会显示收益，文案可能为"获得 5 个鸡腿""鸡腿10个"等，
+    数字可能在鸡腿前也可能在后，这里两种都匹配。
+    页面文案可能随站点调整，提取失败时返回空字符串，不影响主流程。
+    """
+    try:
+        page_text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        # 数字在前：5个鸡腿 / 5 鸡腿；数字在后：鸡腿10个 / 鸡腿 10 个
+        match = re.search(r'[^。；;\s]{0,20}?\d+\s*个?鸡腿[^。；;]{0,20}', page_text) \
+            or re.search(r'[^。；;\s]{0,20}?鸡腿\s*\d+\s*个?[^。；;]{0,20}', page_text)
+        return match.group(0).strip() if match else ""
+    except Exception as e:
+        print(f"提取签到收益失败: {str(e)}")
+        return ""
+
+
+def fetch_account_summary(driver, site):
+    """
+    从指定站点主页抓取账号概览：等级、总鸡腿数，以及评论数、主题数等可见统计。
+
+    这些信息显示在主页左上角用户信息区，文案形如"等级 Lv 1""鸡腿 118"
+    "评论数 123""主题贴数 45"等。不同账号/时期可见字段可能略有差异，
+    因此逐项独立解析，缺哪项就不带哪项，不影响其他项。
+    解析失败时返回空列表，由调用方决定是否加入通知。
+    """
+    summary = {}
+    try:
+        driver.get(site.home_url)
+        if not wait_for_cloudflare(driver):
+            print(f"[{site.name}] 抓取账号概览时未通过 Cloudflare，跳过")
+            return summary
+        time.sleep(2)
+
+        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        # 各字段按"label + 数字"匹配，标签与数字之间允许空白
+        patterns = {
+            'level': r'等级\s*(?:Lv\.?\s*)?(\d+)',
+            'chicken_leg': r'鸡腿\s*(\d+(?:\.\d+)?)',
+            'comment': r'评论数?\s*(\d+)',
+            'topic': r'主题贴?数?\s*(\d+)',
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                summary[key] = match.group(1)
+
+        if not summary:
+            # 只报告抓取失败，不 dump 页面文本：主页文本可能含用户名等个人信息，
+            # 公开仓库的 Actions 日志全网可见，不应把整段文本写进日志
+            print(f"[{site.name}] 未抓到任何账号概览字段，可能页面结构已变化")
+    except Exception as e:
+        print(f"[{site.name}] 抓取账号概览失败: {str(e)}")
+    return summary
+
+
+def detect_already_signed(driver):
+    """
+    判断签到页是否确实显示"今日已签到"，用于区分"确实签过了"与"点击没生效"。
+
+    判定口径必须严格：只认收尾文案（"明天再来"）或已完成的收益句
+    （"今日签到获得鸡腿x个"）。泛化的"今日签到""已签到"不算命中——未签到、甚至
+    未登录的页面同样会渲染签到入口文案，宽松匹配会把漏签静默掩盖成成功
+    （2026-09-30 事故：cookie 丢 session 未登录，两站都报"今日已签到"但都没签上）。
+    """
+    try:
+        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+    except Exception as e:
+        print(f"检测已签到状态失败: {str(e)}")
+        return False
+
+    for marker in SIGNED_MARKERS:
+        if marker in text:
+            print(f"页面命中已签到收尾文案: {marker}", flush=True)
+            return True
+
+    match = SIGNED_REWARD_PATTERN.search(text)
+    if match:
+        print(f"页面命中已签到收益句: {match.group(0).strip()}", flush=True)
+        return True
+
+    return False
+
+
+def detect_login_required(driver):
+    """
+    判断当前是否处于未登录状态，说明 cookie 已失效。
+
+    不能只看正文里有没有"登录"二字——已登录的论坛页面顶部也有"登录/注册"入口，
+    会误判。改用更可靠的信号：
+    1. 页面 <title> 包含"登录"二字（真实登录页标题形如 NodeSeek-登录）；
+    2. current_url 落到登录/注册路径（cookie 失效时常被重定向过去）。
+    """
+    try:
+        title = (driver.title or "")
+        if "登录" in title or "login" in title.lower():
+            return True
+        # 站点登录页路径形如 signIn.html / login，签到页是 /board 不在此列。
+        # 只匹配登录/注册路径，避免把签到页 URL 误判为需要登录。
+        current_url = (driver.current_url or "").lower()
+        login_paths = ("/login", "/signin.html", "/sign-in", "/register", "/signup")
+        return any(path in current_url for path in login_paths)
+    except Exception as e:
+        print(f"检测登录状态失败: {str(e)}")
+        return False
+
+
+def click_sign_icon(driver, site, logged_in=True):
+    """
+    执行指定站点签到：直接打开签到页 /board 并领取奖励。
+
+    logged_in 为本站在签到前已确认登录态（抓到账号概览）的结果，默认 True 兼容旧调用。
+
+    返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述。
+    只有确认领取成功、或在已确认登录态的前提下看到签到后才会出现的收尾文案，
+    才算成功；其余一律视为失败，避免掩盖真实问题。
+    """
+    try:
+        print(f"[{site.name}] 正在打开签到页: {site.sign_url}", flush=True)
+        driver.get(site.sign_url)
+
+        print(f"[{site.name}] 签到页已请求，开始等待 Cloudflare...", flush=True)
+        # 签到页同样可能被 Cloudflare 拦下
+        if not wait_for_cloudflare(driver):
+            return {"success": False, "detail": "签到失败: 未能通过 Cloudflare 挑战"}
+
+        time.sleep(2)
+        print(f"当前页面URL: {driver.current_url}", flush=True)
+
+        print("检测登录状态...", flush=True)
+        if detect_login_required(driver):
+            print("检测到需要登录", flush=True)
+            return {"success": False, "detail": "签到失败: cookie 已失效，需要重新登录"}
+
+        # 关键：先找领取按钮，而不是先看"已签到"文案。
+        # 原因是签到收益文案（"今日签到获得鸡腿x个"）在站点按自然日重置后会继续挂着，
+        # 直到下次签到。若先看文案，零点刚过、旧文案仍在而新按钮已出现时，
+        # 会被误判成"今日已签到"而跳过点击。
+        # 正确顺序：有按钮→未签到，点击领取；无按钮→再核对文案确认是否真已签过。
+        button_text = '试试手气' if ns_random else '鸡腿 x 5'
+        print(f"查找领取按钮: {button_text}", flush=True)
+        try:
+            # 已签到场景下没有按钮，用较短超时避免空等 15 秒
+            click_button = WebDriverWait(driver, 6).until(
+                EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{button_text}')]"))
+            )
+        except Exception:
+            # 找不到按钮，再核对是否为已签到状态
+            print("未找到领取按钮，核对是否已签到...", flush=True)
+            if not logged_in:
+                # 未确认登录态时页面上的签到文案不可信：未登录页面同样会渲染
+                # "今日签到"这类入口文案（2026-09-30 漏签事故即由此而来），
+                # 只有确实登录并抓到账号信息才允许按"已签到"收尾。
+                # 通知里只给中性结论，具体线索（如缺 session）打在日志中
+                if not cookie_has_login(site):
+                    if orphan_login_candidate(site):
+                        print("未确认登录态：开头的无名片段已按登录凭据试注入仍无效，粘贴确实被截断", flush=True)
+                    else:
+                        print("未确认登录态：cookie 串里没有 session 字段，粘贴大概率不完整", flush=True)
+                else:
+                    print("未确认登录态：cookie 可能已失效", flush=True)
+                return {"success": False,
+                        "detail": "签到失败: 未确认登录态（cookie 可能不完整或已失效），页面也没有领取按钮"}
+            if detect_already_signed(driver):
+                print("页面显示今日已签到", flush=True)
+                return {"success": True, "detail": "今日已签到"}
+            # 既无按钮又无已签到文案，属于异常状态，如实报失败而非静默成功
+            # 不打印页面源码：公开仓库日志全网可见，登录态页面源码可能含个人信息
+            try:
+                print(f"当前页面URL: {driver.current_url}", flush=True)
+            except Exception:
+                pass
+            return {"success": False, "detail": f"签到失败: 未找到领取按钮（{button_text}），且页面无已签到标志"}
+
+        # 滚动到按钮再点击，避免被固定头部遮挡；原生点击失败时回退 JS 点击
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", click_button)
+        time.sleep(0.5)
+        try:
+            click_button.click()
+        except Exception as click_error:
+            print(f"原生点击失败，改用 JavaScript 点击: {str(click_error)}", flush=True)
+            driver.execute_script("arguments[0].click();", click_button)
+
+        print("已点击领取按钮，等待结果...", flush=True)
+        time.sleep(3)
+
+        # 校验结果：拿到收益描述或出现已签到标志才算成功
+        reward = extract_sign_reward(driver)
+        if reward:
+            print(f"签到成功: {reward}", flush=True)
+            return {"success": True, "detail": f"签到成功，{reward}"}
+
+        if detect_already_signed(driver):
+            if not logged_in:
+                # 同上：登录态未确认时，页面收尾文案不足以证明签到成功
+                print("点击后出现已签到文案，但登录态未确认，不按成功收尾", flush=True)
+                return {"success": False, "detail": "签到失败: 登录态未确认，无法确认签到结果"}
+            print("点击后页面显示已签到", flush=True)
+            return {"success": True, "detail": "签到成功"}
+
+        # 点击后未确认到成功，如实报失败。不打印页面源码避免个人信息进公开日志
+        return {"success": False, "detail": "签到失败: 已点击领取按钮但未能确认签到结果"}
+
+    except Exception as e:
+        # except 块内访问 driver 可能二次抛错（如 driver 已失效），
+        # 必须单独防护，否则会逃逸到 run() 外，丢失原有错误信息。
+        print(f"签到过程中出错:", flush=True)
+        print(f"错误类型: {type(e).__name__}", flush=True)
+        print(f"错误信息: {str(e)}", flush=True)
+        try:
+            print(f"当前页面URL: {driver.current_url}", flush=True)
+        except Exception:
+            pass
+        # 不打印页面源码：公开仓库日志全网可见，登录态页面源码可能含用户名等个人信息
+        print("详细错误信息:", flush=True)
+        traceback.print_exc()
+        return {"success": False, "detail": f"签到失败: {type(e).__name__} {str(e)}"}
+
+def create_driver():
+    """
+    初始化浏览器实例，不绑定任何站点 cookie。
+    多站点共用同一个 driver，各自注入自己的 cookie 后操作各自域名。
+    """
+    try:
+        print("开始初始化浏览器...")
+        options = uc.ChromeOptions()
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        # 以下参数与是否无头无关，始终降低自动化特征。
+        # 不覆盖 User-Agent：伪造的 UA 若与真实平台和 Chrome 版本不一致，
+        # 反而会成为 Cloudflare 的识别特征，让 undetected-chromedriver 使用真实 UA。
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--window-size=1920,1080')
+
+        if headless:
+            # 无头模式指纹更容易被 Cloudflare 识别。
+            # 在 GitHub Actions 中建议改用 xvfb-run 提供虚拟显示并令 HEADLESS=false，
+            # 以有头浏览器运行，通过挑战的概率明显更高。
+            print("启用无头模式（Cloudflare 拦截概率较高）...")
+            options.add_argument('--headless=new')
+            options.add_argument('--disable-gpu')
+        else:
+            print("使用有头模式（需要可用的显示环境，如 xvfb）...")
+
+        print("正在启动Chrome...")
+        # undetected-chromedriver 默认下载最新版驱动，而 runner 预装的 Chrome 往往落后一个大版本，
+        # 二者不匹配会直接抛 SessionNotCreatedException。显式传入实际大版本号强制取匹配的驱动。
+        version_main = detect_chrome_major_version()
+        if version_main:
+            print(f"检测到 Chrome 大版本: {version_main}，将使用匹配的驱动")
+            driver = uc.Chrome(options=options, version_main=version_main)
+        else:
+            print("未能检测到 Chrome 版本，回退为自动匹配")
+            driver = uc.Chrome(options=options)
+
+        # 隐藏 webdriver 标记，有头/无头模式都需要
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.set_window_size(1920, 1080)
+        print("Chrome启动成功")
+        return driver
+
+    except Exception as e:
+        print(f"初始化浏览器出错: {str(e)}")
+        print("详细错误信息:")
+        print(traceback.format_exc())
+        return None
+
+
+def inject_site_cookies(driver, site):
+    """
+    为指定站点注入 cookie 并刷新确认登录态。
+    返回 True 表示注入成功且看起来已登录，False 表示注入失败。
+    """
+    try:
+        print(f"[{site.name}] 正在设置cookie...", flush=True)
+        driver.get(site.home_url)
+
+        # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
+        wait_for_cloudflare(driver)
+
+        pairs, skipped = parse_cookie_string(site.cookie)
+        for reason in skipped:
+            print(f"[{site.name}] 跳过 cookie: {reason}", flush=True)
+
+        # 粘贴被从头截断时，开头的无名片段很可能就是被截掉名字的 session 值
+        # （2026-09-30 事故的真实形态）。丢弃它会让浏览器停在未登录状态，
+        # 这里补进注入列表试一次：随后的账号概览能验证真伪，验不过仍按失败处理。
+        recovered_login = False
+        if not cookie_has_login(site):
+            orphan = orphan_login_candidate(site)
+            if orphan:
+                pairs.append(("session", orphan))
+                recovered_login = True
+                print(f"[{site.name}] 开头的无名片段（{describe_fragment(orphan)}）"
+                      f"按「被截掉名字的登录凭据」试注入，以账号概览确认是否生效", flush=True)
+
+        injected = 0
+        for name, value in pairs:
+            try:
+                # 不传 domain：Chrome 151 的 chromedriver 会拒绝显式
+                # domain（invalid cookie domain，2026-08-30 linux.sb 通道实测
+                # 全部注入失败）；省略后由 chromedriver 按当前页面 host 自动
+                # 落域（当前已 get(site.home_url)），效果相同且跨版本稳定
+                driver.add_cookie({
+                    'name': name,
+                    'value': value,
+                    'path': '/'
+                })
+                injected += 1
+            except Exception as e:
+                print(f"[{site.name}] 注入 cookie {name} 失败: {str(e)}")
+                continue
+
+        # 只打印名称不打印值，便于比对配置是否完整而不泄漏凭据
+        print(f"[{site.name}] 共注入 {injected} 个 cookie: {[name for name, _ in pairs]}")
+        if injected == 0:
+            print(f"[{site.name}] 没有任何有效 cookie 被注入，请检查 cookie 格式（应形如 session=xxx）")
+            return False
+
+        if not cookie_has_login(site) and not recovered_login:
+            # 只作提示不参与判定：session 是 HttpOnly cookie，用 document.cookie
+            # 之类的方式复制必然漏掉它，是粘贴不完整最常见的形态
+            print(f"[{site.name}] 提示: cookie 串里没有 session 字段，登录态可能不完整；"
+                  f"session 是 HttpOnly cookie，需从浏览器「网络 → 该站请求 → 请求头 → Cookie」整段复制")
+
+        print(f"[{site.name}] 刷新页面...", flush=True)
+        driver.refresh()
+        time.sleep(5)
+
+        # 带上登录态后可能再次遇到挑战，这里等待通过后再交给后续任务
+        if not wait_for_cloudflare(driver):
+            print(f"[{site.name}] Cloudflare 挑战未通过，后续操作很可能失败")
+
+        return True
+
+    except Exception as e:
+        print(f"[{site.name}] 设置Cookie时出错: {str(e)}")
+        print(traceback.format_exc())
+        return False
+
+
+def setup_driver_and_cookies(site):
+    """
+    向后兼容的封装：初始化浏览器并为指定站点注入 cookie。
+    返回 driver 实例（成功）或 None（失败）。
+    """
+    driver = create_driver()
+    if not driver:
+        return None
+    if not inject_site_cookies(driver, site):
+        driver.quit()
+        return None
+    return driver
+
+
+def nodeseek_comment(driver, site):
+    """
+    在指定站点交易区随机帖子下评论并尝试加鸡腿
+    返回: {"total": int, "commented": int, "chicken_leg": bool, "error": str}
+    """
+    stats = {"total": 0, "commented": 0, "chicken_leg": False, "error": ""}
+    try:
+        print(f"[{site.name}] 正在访问交易区...")
+        driver.get(site.trade_url)
+        print("等待页面加载...")
+        
+        # 获取初始帖子列表
+        posts = WebDriverWait(driver, 30).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, '.post-list-item'))
+        )
+        print(f"成功获取到 {len(posts)} 个帖子")
+        
+        # 过滤掉置顶帖
+        valid_posts = [post for post in posts if not post.find_elements(By.CSS_SELECTOR, '.pined')]
+        selected_posts = random.sample(valid_posts, min(20, len(valid_posts)))
+        
+        # 存储已选择的帖子URL
+        selected_urls = []
+        for post in selected_posts:
+            try:
+                post_link = post.find_element(By.CSS_SELECTOR, '.post-title a')
+                selected_urls.append(post_link.get_attribute('href'))
+            except:
+                continue
+        
+        is_chicken_leg = False
+        stats["total"] = len(selected_urls)
+
+        # 使用URL列表进行操作
+        for i, post_url in enumerate(selected_urls):
+            try:
+                print(f"正在处理第 {i+1} 个帖子")
+                driver.get(post_url)
+                
+                # 处理加鸡腿
+                if is_chicken_leg is False:
+                    is_chicken_leg = click_chicken_leg(driver)
+                
+                # 等待 CodeMirror 编辑器加载
+                editor = WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, '.CodeMirror'))
+                )
+                
+                # 点击编辑器区域获取焦点
+                editor.click()
+                time.sleep(0.5)
+                input_text = random.choice(randomInputStr)
+
+                # 模拟输入
+                actions = ActionChains(driver)
+                # 随机输入 randomInputStr
+                for char in input_text:
+                    actions.send_keys(char)
+                    actions.pause(random.uniform(0.1, 0.3))
+                actions.perform()
+                
+                # 等待一下确保内容已经输入
+                time.sleep(2)
+                
+                # 使用更精确的选择器定位提交按钮
+                submit_button = WebDriverWait(driver, 30).until(
+                 EC.element_to_be_clickable((By.XPATH, "//button[contains(@class, 'submit') and contains(@class, 'btn') and contains(text(), '发布评论')]"))
+                )
+                # 确保按钮可见并可点击
+                driver.execute_script("arguments[0].scrollIntoView(true);", submit_button)
+                time.sleep(0.5)
+                submit_button.click()
+                
+                stats["commented"] += 1
+                print(f"已在帖子 {post_url} 中完成评论")
+
+                # 返回交易区
+                # driver.get(target_url)
+                # time.sleep(2)  # 等待页面加载
+                time.sleep(random.uniform(2,5))
+                
+            except Exception as e:
+                print(f"处理帖子时出错: {str(e)}")
+                continue
+                
+        stats["chicken_leg"] = is_chicken_leg
+        print("NodeSeek评论任务完成")
+
+    except Exception as e:
+        stats["error"] = f"{type(e).__name__} {str(e)}"
+        print(f"NodeSeek评论出错: {str(e)}")
+        print("详细错误信息:")
+        print(traceback.format_exc())
+
+    return stats
+
+
+def build_notify_content(site_results, task_started_at=None):
+    """
+    把各站点签到结果拼成通知正文（纯文本，各渠道通用）。
+
+    site_results: [(site, sign_result, comment_stats, account_summary, started_at), ...]
+    单站点时仍按原排版输出，多站点时每站一段、用分隔线隔开。
+    顶部为「任务开始时间」（早于各站签到时间），每站段首带本站「签到时间」，
+    多站时可直观看出两站间隔与延迟。
+    """
+    # 顶部时间默认回退到当前时刻，保持单测和旧调用兼容；
+    # 与各站段内的「签到时间」用不同前缀区分，避免接到一条通知里时语义混淆
+    lines = [f"任务开始时间: {task_started_at or time.strftime('%Y-%m-%d %H:%M:%S')}"]
+
+    def render_site(site, sign_result, comment_stats, account_summary, started_at, header):
+        block = [header, f"签到时间: {started_at}", f"签到结果: {sign_result['detail']}"]
+
+        if account_summary:
+            if account_summary.get('level'):
+                block.append(f"当前等级: Lv {account_summary['level']}")
+            if account_summary.get('chicken_leg'):
+                block.append(f"总鸡腿数: {account_summary['chicken_leg']}")
+            if account_summary.get('comment'):
+                block.append(f"评论数: {account_summary['comment']}")
+            if account_summary.get('topic'):
+                block.append(f"主题贴数: {account_summary['topic']}")
+        else:
+            # 抓不到账号概览说明登录态没确认上或页面结构变了，必须在通知里显形，
+            # 否则"看起来正常"的结果会掩盖登录态问题（2026-09-30 漏签事故）
+            block.append("账号概览: 未抓到（未登录或页面结构已变化）")
+
+        # 附加任务被开关关闭时只说明状态，不输出无意义的 0/0 统计
+        if comment_stats is None:
+            block.append("附加任务: 已关闭（NS_EXTRA_TASKS 未开启）")
+            return block
+
+        if comment_stats["error"]:
+            block.append(f"评论任务: 异常终止（{comment_stats['error']}）")
+        else:
+            block.append(
+                f"评论任务: 成功 {comment_stats['commented']}/{comment_stats['total']} 个帖子"
+            )
+        block.append(f"加鸡腿: {'成功' if comment_stats['chicken_leg'] else '未成功'}")
+        return block
+
+    for index, (site, sign_result, comment_stats, account_summary, started_at) in enumerate(site_results):
+        if index > 0:
+            lines.append("")  # 站点间空行分隔
+        lines.extend(render_site(site, sign_result, comment_stats, account_summary, started_at, f"【{site.name}】"))
+
+    return "\n".join(lines)
+
+def click_chicken_leg(driver):
+    try:
+        print("尝试点击加鸡腿按钮...")
+        chicken_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, '//div[@class="nsk-post"]//div[@title="加鸡腿"][1]'))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", chicken_btn)
+        time.sleep(0.5)
+        chicken_btn.click()
+        print("加鸡腿按钮点击成功")
+        
+        # 等待确认对话框出现
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, '.msc-confirm'))
+        )
+        
+        # 检查是否是7天前的帖子
+        try:
+            error_title = driver.find_element(By.XPATH, "//h3[contains(text(), '该评论创建于7天前')]")
+            if error_title:
+                print("该帖子超过7天，无法加鸡腿")
+                ok_btn = driver.find_element(By.CSS_SELECTOR, '.msc-confirm .msc-ok')
+                ok_btn.click()
+                return False
+        except:
+            ok_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, '.msc-confirm .msc-ok'))
+            )
+            ok_btn.click()
+            print("确认加鸡腿成功")
+            
+        # 等待确认对话框消失
+        WebDriverWait(driver, 5).until_not(
+            EC.presence_of_element_located((By.CSS_SELECTOR, '.msc-overlay'))
+        )
+        time.sleep(1)  # 额外等待以确保对话框完全消失
+        
+        return True
+        
+    except Exception as e:
+        print(f"加鸡腿操作失败: {str(e)}")
+        return False
+
+def run():
+    """
+    执行每日任务并推送通知。
+    遍历所有已配置站点（NodeSeek、DeepFlood 等），每站独立注入 cookie、签到、抓概览，
+    多站点间插入随机延迟降低被风控判为批量行为的概率，最后合并成一条通知。
+    返回进程退出码：全部签到成功为 0，否则为 1。
+    """
+    print("开始执行每日任务...")
+    # 记录任务启动时刻，作为通知顶部时间，早于各站签到时间，符合直觉的时间轴顺序
+    task_started_at = time.strftime('%Y-%m-%d %H:%M:%S')
+    sites = load_sites()
+    if not sites:
+        notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）")
+        return 1
+
+    # 多站点共用同一个浏览器实例，避免重复启动 Chrome
+    driver = create_driver()
+    if not driver:
+        print("浏览器初始化失败")
+        notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境")
+        return 1
+
+    site_results = []
+    for index, site in enumerate(sites):
+        # 第二站及以后先随机延迟，再开始注入。延迟在前可以拉开两站操作的时间间隔
+        if index > 0:
+            gap = random.randint(SITE_GAP_MIN, SITE_GAP_MAX)
+            print(f"[{site.name}] 等待 {gap} 秒后再开始，避免连续签到被风控")
+            time.sleep(gap)
+
+        # 记录本站开始签到的时间，写入通知，便于核对两站执行时点与延迟
+        started_at = time.strftime('%Y-%m-%d %H:%M:%S')
+        print(f"=== 处理 {site.name}（{site.domain}）===")
+        if not inject_site_cookies(driver, site):
+            # cookie 注入失败也要纳入结果，让通知体现这一站异常
+            site_results.append((site, {"success": False, "detail": "cookie 注入失败"}, None, {}, started_at))
+            continue
+
+        # 先抓账号概览：它同时是"已登录"的证据，也是通知里的账号状态来源。
+        # 必须早于签到，因为未登录页面上同样会出现"今日签到"这类入口文案，
+        # 没有登录态就无法把"页面显示已签到"当成成功依据。
+        # 本站在注入阶段是否做过「无名片段当登录凭据」的试注入。
+        # 与 inject_site_cookies 用同一条件重算（纯函数），避免为传一个标记改动其返回值契约。
+        recovered_login = not cookie_has_login(site) and bool(orphan_login_candidate(site))
+
+        print(f"[{site.name}] 抓取账号概览并确认登录态...")
+        account_summary = fetch_account_summary(driver, site)
+        logged_in = bool(account_summary)
+        if logged_in and recovered_login:
+            print(f"[{site.name}] 登录态已确认：开头的无名片段就是被截掉名字的登录凭据，"
+                  f"本次无需重新粘贴 cookie", flush=True)
+        if not logged_in:
+            print(f"[{site.name}] 未抓到任何账号概览字段，登录态未确认", flush=True)
+            if recovered_login:
+                print(f"[{site.name}] 线索: 已把开头的无名片段按登录凭据试注入仍无效，"
+                      f"说明粘贴确实被截断或 cookie 已失效，需重新登录后整段复制", flush=True)
+            elif not cookie_has_login(site):
+                print(f"[{site.name}] 线索: cookie 串里没有 session 字段（HttpOnly 项），"
+                      f"粘贴可能不完整；若确认已整段复制，则是 cookie 已失效需重新登录", flush=True)
+
+        # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
+        if extra_tasks_enabled:
+            print(f"[{site.name}] NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
+            comment_stats = nodeseek_comment(driver, site)
+        else:
+            print(f"[{site.name}] NS_EXTRA_TASKS 未开启，仅执行签到")
+            comment_stats = None
+
+        sign_result = click_sign_icon(driver, site, logged_in=logged_in)
+
+        site_results.append((site, sign_result, comment_stats, account_summary, started_at))
+
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+    print("脚本执行完成")
+
+    all_success = all(r[1]["success"] for r in site_results)
+    title = "NodeSeek 每日任务" + ("" if all_success else "（签到异常）")
+    notify.send(title, build_notify_content(site_results, task_started_at))
+    return 0 if all_success else 1
+
+
+def main():
+    """顶层入口，捕获所有未预期异常，确保通知一定能发出。"""
+    try:
+        return run()
+    except Exception:
+        # run 内部已对已知失败路径做了处理，这里只兜底真正未捕获的异常
+        print("脚本发生未预期异常:")
+        traceback.print_exc()
+        notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查")
+        return 1
+
+
+if __name__ == "__main__":
+    exit(main())
+
