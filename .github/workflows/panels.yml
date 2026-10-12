@@ -1,0 +1,36 @@
+name: panels-checkin
+
+on:
+  schedule:
+    - cron: '0 */8 * * *'
+  workflow_dispatch:
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests curl_cffi
+
+      - name: Run checkin
+        run: python panels/checkin.py
+        env:
+          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
+          # 面板账号：变量为空即跳过该面板（面板清单见 panels/checkin.py 的 PANELS）
+          GLADOS_ACCOUNTS_JSON: ${{ secrets.GLADOS_ACCOUNTS_JSON }}
+          RAILGUN_ACCOUNTS_JSON: ${{ secrets.RAILGUN_ACCOUNTS_JSON }}
+          # Railgun 单独推送渠道；未配置时回退到 PUSH_WEBHOOK_URL
+          RAILGUN_PUSH_WEBHOOK_URL: ${{ secrets.RAILGUN_PUSH_WEBHOOK_URL }}
+          # 面板级 UA 覆盖（可选 vars）：某站需要与登录设备一致的其他平台 UA 时再配置
+          GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
+          RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT }}
