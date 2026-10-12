@@ -3,7 +3,7 @@
 linux.sb（烧饼社区）每日自动签到脚本。
 
 与 nodeseek_daily.py 同属本仓库的多站签到体系：NodeSeek、DeepFlood 与 linux.sb
-可顺序执行，共用 notify.py 推送通知。
+可顺序执行，共用仓库根目录 notify.py 推送通知。
 
 签到有两条通道，按站点当前的防护状态自动选择：
 1. requests 通道（快，站点未启用挑战时使用）。接口协议对照 qd-today/templates
@@ -30,16 +30,23 @@ linux.sb（烧饼社区）每日自动签到脚本。
   与 nodeseek_daily.py 的站间延迟共用同一对变量，降低被风控判为批量行为的概率
 - LINUXSB_FORCE_BROWSER：置 1 时跳过 requests 探测直接走浏览器通道。用于站点
   长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
-- 通知渠道配置见 notify.py（TG_BOT_TOKEN、WECOM_WEBHOOK 等，全部可选）
+- 通知渠道配置见仓库根目录 notify.py（TG_BOT_TOKEN、FEISHU_WEBHOOK、BARK_URL 等，全部可选）
 """
 import json
 import os
 import re
 import random
+import sys
 import time
 import traceback
 
 import requests
+
+# 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
+# 保证从任意工作目录运行脚本都能正确导入
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import notify
 

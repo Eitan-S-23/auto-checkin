@@ -2,18 +2,24 @@
 
 面板列表驱动：哪个面板配置了账号变量就签到哪个，未配置的自动跳过、不算失败。
 账号通过各面板的 *_ACCOUNTS_JSON 环境变量提供（JSON 数组，元素含 email / cookie）。
+通知走仓库根目录的统一通知模块 notify.py，向所有已配置的渠道推送。
 """
 import datetime
 import json
 import os
 import random
+import sys
 import time
 
-import requests
 from curl_cffi import requests as cffi_requests
 
-# 默认推送 webhook（企业微信群机器人）；面板可用各自的 webhook 变量覆盖
-PUSH_WEBHOOK_URL = os.getenv("PUSH_WEBHOOK_URL", "").strip().strip('"').strip("'")
+# 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
+# 保证从任意工作目录运行脚本都能正确导入
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import notify
 
 # 固定 Windows UA，不做随机轮换：GLaDOS 系面板会比对签到请求客户端与登录设备平台，
 # UA 与登录设备不一致会被反自动化检测拦截、积分被拒（2026-10 实测）。
@@ -30,7 +36,6 @@ PANELS = [
         "origin": "https://glados.cloud",
         "token": "glados.cloud",
         "accounts_env": "GLADOS_ACCOUNTS_JSON",
-        "webhook_env": "",
         "ua_env": "GLADOS_USER_AGENT",
     },
     {
@@ -38,7 +43,6 @@ PANELS = [
         "origin": "https://railgun.info",
         "token": "railgun.info",
         "accounts_env": "RAILGUN_ACCOUNTS_JSON",
-        "webhook_env": "RAILGUN_PUSH_WEBHOOK_URL",
         "ua_env": "RAILGUN_USER_AGENT",
     },
 ]
@@ -108,18 +112,6 @@ def bytes_to_gb(traffic_bytes):
     return f"{gb:.3f}"
 
 
-def send_webhook(webhook_url, content):
-    if not webhook_url:
-        print("未配置 Webhook，跳过推送")
-        return
-    try:
-        data = {"msgtype": "text", "text": {"content": content}}
-        requests.post(webhook_url, json=data, timeout=10)
-        print("Webhook 发送成功")
-    except Exception as e:
-        print(f"发送失败: {e}")
-
-
 def create_retry_session():
     return cffi_requests.Session(impersonate="chrome124")
 
@@ -162,25 +154,26 @@ def sign(panel, cookie):
 
 
 def checkin_panel(panel):
-    """处理单个面板并返回推送文案；面板未启用时返回 None。"""
+    """处理单个面板并返回推送内容 (标题, 正文)；面板未启用时返回 None。"""
     raw = os.getenv(panel["accounts_env"], "").strip()
     if not raw:
         print(f"[{panel['name']}] 未配置 {panel['accounts_env']}，跳过")
         return None
 
+    beijing_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+    title = f"【{panel['name']} 自动签到】{beijing_now.strftime('%m-%d %H:%M')}"
+
     try:
         accounts = parse_accounts(raw)
     except Exception as e:
         print(f"[{panel['name']}] 账号配置解析失败: {e}")
-        return f"【{panel['name']} 自动签到】账号配置解析失败，请检查 {panel['accounts_env']} ⚠️"
+        return title, f"账号配置解析失败，请检查 {panel['accounts_env']} ⚠️"
 
     if not accounts:
         print(f"[{panel['name']}] 账号列表为空，跳过")
         return None
 
-    beijing_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-    msg_list = [f"【{panel['name']} 自动签到】{beijing_now.strftime('%m-%d %H:%M')}\n"]
-
+    msg_list = []
     for idx, acc in enumerate(accounts, 1):
         email = acc.get("email", f"账号{idx}")
         cookie = acc.get("cookie", "")
@@ -202,19 +195,18 @@ def checkin_panel(panel):
 
         time.sleep(random.randint(2, 4))
 
-    return "\n".join(msg_list)
+    return title, "\n".join(msg_list)
 
 
 def run():
     processed = 0
     for panel in PANELS:
-        content = checkin_panel(panel)
-        if content is None:
+        result = checkin_panel(panel)
+        if result is None:
             continue
         processed += 1
-        webhook_env = panel.get("webhook_env")
-        webhook_url = (os.getenv(webhook_env, "") if webhook_env else "").strip() or PUSH_WEBHOOK_URL
-        send_webhook(webhook_url, content)
+        title, content = result
+        notify.send(title, content)
 
     if processed == 0:
         print("所有面板均未配置，无签到任务")

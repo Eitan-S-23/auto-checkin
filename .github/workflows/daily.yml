@@ -23,18 +23,29 @@ jobs:
       # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
       SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
       SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
-      # Telegram 通知（可选）
+      # 通知渠道（全部可选，配了哪个推哪个，完整说明见根目录 README「通知渠道」）
       TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
       TG_USER_ID: ${{ secrets.TG_USER_ID }}
       TG_API_HOST: ${{ secrets.TG_API_HOST }}
       TG_PROXY: ${{ secrets.TG_PROXY }}
-      # 企业微信群机器人通知（可选）
+      FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-      # 企业微信自建应用通知（可选）
       WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
       WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
       WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
       WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
+      BARK_URL: ${{ secrets.BARK_URL }}
+      SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      NTFY_PRIORITY: ${{ secrets.NTFY_PRIORITY }}
+      GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+      GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+      GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
 
     steps:
       - name: Checkout repository

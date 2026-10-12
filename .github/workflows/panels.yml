@@ -25,12 +25,34 @@ jobs:
       - name: Run checkin
         run: python panels/checkin.py
         env:
-          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
           # 面板账号：变量为空即跳过该面板（面板清单见 panels/checkin.py 的 PANELS）
           GLADOS_ACCOUNTS_JSON: ${{ secrets.GLADOS_ACCOUNTS_JSON }}
           RAILGUN_ACCOUNTS_JSON: ${{ secrets.RAILGUN_ACCOUNTS_JSON }}
-          # Railgun 单独推送渠道；未配置时回退到 PUSH_WEBHOOK_URL
-          RAILGUN_PUSH_WEBHOOK_URL: ${{ secrets.RAILGUN_PUSH_WEBHOOK_URL }}
           # 面板级 UA 覆盖（可选 vars）：某站需要与登录设备一致的其他平台 UA 时再配置
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT }}
+          # 通知渠道（全部可选，配了哪个推哪个，完整说明见 README「通知渠道」）
+          # PUSH_WEBHOOK_URL 为合并前面板仓库的旧变量，等同企业微信机器人渠道（WECOM_WEBHOOK 优先）
+          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+          TG_API_HOST: ${{ secrets.TG_API_HOST }}
+          TG_PROXY: ${{ secrets.TG_PROXY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+          WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
+          WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+          WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_PRIORITY: ${{ secrets.NTFY_PRIORITY }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}

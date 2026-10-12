@@ -14,7 +14,7 @@
 - 除签到外的任务有一键开关，默认关闭
 - 支持 GitHub Actions 自动运行
 - 支持无头模式（可配置）
-- 任务结束后推送通知到 Telegram 和企业微信
+- 任务结束后推送通知（Telegram、飞书、钉钉、企业微信、Bark、Server酱、PushPlus、ntfy、Gotify 等渠道，见仓库根目录 README）
 
 ## 环境变量配置
 
@@ -50,25 +50,7 @@ DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构
 
 ### 通知配置（全部可选）
 
-每次任务执行完毕后会汇总签到结果、评论数量、加鸡腿状态并推送。只配置哪个渠道就推送到哪个渠道，未配置的自动跳过，某个渠道失败不影响其他渠道，也不会导致任务失败。
-
-Telegram：
-
-- `TG_BOT_TOKEN`: Bot Token，从 [@BotFather](https://t.me/BotFather) 获取
-- `TG_USER_ID`: 接收消息的用户或群组 ID
-- `TG_API_HOST`: 自建反代地址（可选，默认 `https://api.telegram.org`）
-- `TG_PROXY`: HTTP 代理地址（可选，例如 `http://127.0.0.1:7890`）
-
-企业微信群机器人（配置最简单，推荐）：
-
-- `WECOM_WEBHOOK`: 群机器人的 Webhook 完整地址（群聊 -> 添加群机器人 -> 复制 Webhook）
-
-企业微信自建应用：
-
-- `WECOM_CORPID`: 企业 ID
-- `WECOM_CORPSECRET`: 应用的 Secret
-- `WECOM_AGENTID`: 应用的 AgentId
-- `WECOM_TOUSER`: 接收成员（可选，默认 `@all`）
+每次任务执行完毕后会汇总签到结果、评论数量、加鸡腿状态并推送。通知由仓库根目录 `notify.py` 统一实现，支持的全部渠道与对应环境变量见仓库根目录 [README 的「通知渠道」章节](../README.md#通知渠道全部可选)：只配置哪个渠道就推送到哪个渠道，未配置的自动跳过，某个渠道失败不影响其他渠道，也不会导致任务失败。
 
 通知内容示例（多站签到，实际推送格式）：
 
@@ -115,7 +97,7 @@ NodeSeek 每日任务
 3. 可选：添加 `NS_RANDOM` 设置是否随机选择奖励
 4. 可选：需要评论和加鸡腿时，添加 `NS_EXTRA_TASKS=true`（不配置则只签到）
 5. 可选：配置多站签到 `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE`（不配置则只签 NodeSeek 一站；linux.sb 多账号用 `&` 分隔；linux.sb 可另配 `LINUXSB_ACCOUNT`（JSON 账号密码）作 cookie 失效时的自动登录兜底）
-6. 可选：添加通知渠道的 Secrets（如 `WECOM_WEBHOOK` 或 `TG_BOT_TOKEN` + `TG_USER_ID`），workflow 已预置全部通知变量，未添加的自动跳过
+6. 可选：添加通知渠道的 Secrets（渠道与环境变量清单见仓库根目录 README「通知渠道」），workflow 已预置全部通知变量，未添加的自动跳过
 7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
 
 `NS_EXTRA_TASKS` 和 `NS_RANDOM` 这类非敏感开关既可以放在 Variables 也可以放在 Secrets，workflow 会优先取 Variables。放在 Variables 的好处是能在页面上直接看到当前值。

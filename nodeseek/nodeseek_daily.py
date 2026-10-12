@@ -15,10 +15,17 @@ import shutil
 import subprocess
 import time
 import traceback
+import sys
 import unicodedata
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
+
+# 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
+# 保证从任意工作目录运行脚本都能正确导入
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import notify
 

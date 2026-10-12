@@ -2,13 +2,24 @@
 """通知模块单元测试。
 
 用桩替换 requests.request，覆盖以下场景：
-- 未配置渠道时跳过
-- Telegram / 企业微信机器人 / 企业微信应用 正常推送
+- 未配置渠道时全部跳过
+- 各渠道正常推送（含钉钉加签、Server酱两种 Key、Bark 地址解析、旧变量兼容）
 - 接口返回业务错误时标记失败且不影响其他渠道
 - 超长内容按字符数与字节数截断
 """
+import base64
+import hashlib
+import hmac
+import os
+import sys
 import unittest
 from unittest import mock
+from urllib.parse import quote_plus
+
+# 通知模块位于仓库根目录，补入搜索路径后以任意工作目录运行测试都能导入
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import notify
 
@@ -16,9 +27,16 @@ import notify
 ENV_KEYS = (
     "TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TG_USER_ID", "TG_CHAT_ID", "TELEGRAM_CHAT_ID",
     "TG_API_HOST", "TG_PROXY",
-    "WECOM_WEBHOOK", "WECHAT_WEBHOOK", "QYWX_WEBHOOK",
+    "FEISHU_WEBHOOK", "FEISHU_KEY",
+    "DINGTALK_WEBHOOK", "DINGTALK_ACCESS_TOKEN", "DINGTALK_SECRET",
+    "WECOM_WEBHOOK", "WECHAT_WEBHOOK", "QYWX_WEBHOOK", "PUSH_WEBHOOK_URL",
     "WECOM_CORPID", "QYWX_CORPID", "WECOM_CORPSECRET", "QYWX_CORPSECRET",
     "WECOM_AGENTID", "QYWX_AGENTID", "WECOM_TOUSER", "QYWX_TOUSER",
+    "BARK_URL",
+    "SERVERCHAN_KEY", "SERVERCHAN_SENDKEY",
+    "PUSHPLUS_TOKEN", "PUSHPLUS_KEY", "PUSHPLUS_TOPIC",
+    "NTFY_URL", "NTFY_TOPIC", "NTFY_PRIORITY",
+    "GOTIFY_URL", "GOTIFY_TOKEN", "GOTIFY_PRIORITY",
 )
 
 
@@ -49,9 +67,7 @@ class NotifyTestCase(unittest.TestCase):
         with mock.patch("notify.requests.request") as request:
             results = notify.send("标题", "正文")
         request.assert_not_called()
-        self.assertEqual(
-            results, {"Telegram": "skipped", "企业微信机器人": "skipped", "企业微信应用": "skipped"}
-        )
+        self.assertEqual(results, {name: "skipped" for name, _ in notify.CHANNELS})
 
     def test_telegram_推送成功并携带正确参数(self):
         with mock.patch.dict("os.environ", {"TG_BOT_TOKEN": "token123", "TG_USER_ID": "456"}):
@@ -68,6 +84,63 @@ class NotifyTestCase(unittest.TestCase):
         self.assertEqual(payload["chat_id"], "456")
         self.assertEqual(payload["text"], "标题\n\n正文")
 
+    def test_飞书_完整地址推送成功并携带正确参数(self):
+        webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/abc123"
+        with mock.patch.dict("os.environ", {"FEISHU_WEBHOOK": webhook}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 0})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["飞书"], "sent")
+        self.assertEqual(request.call_args.args[1], webhook)
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload["msg_type"], "text")
+        self.assertEqual(payload["content"]["text"], "标题\n\n正文")
+
+    def test_飞书_纯key自动拼接地址(self):
+        with mock.patch.dict("os.environ", {"FEISHU_WEBHOOK": "abc-key"}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 0})
+            ) as request:
+                notify.send("标题", "正文")
+
+        self.assertEqual(request.call_args.args[1], f"{notify.FEISHU_API}/abc-key")
+
+    def test_钉钉_配置加签后按官方算法签名(self):
+        fix_time = 1700000000.123
+        env = {
+            "DINGTALK_WEBHOOK": "https://oapi.dingtalk.com/robot/send?access_token=abc",
+            "DINGTALK_SECRET": "sec",
+        }
+        with mock.patch.dict("os.environ", env):
+            with mock.patch("notify.time.time", return_value=fix_time):
+                with mock.patch(
+                    "notify.requests.request", return_value=FakeResponse({"errcode": 0})
+                ) as request:
+                    results = notify.send("标题", "正文")
+
+        self.assertEqual(results["钉钉"], "sent")
+        timestamp = str(round(fix_time * 1000))
+        expected_sign = quote_plus(
+            base64.b64encode(
+                hmac.new(b"sec", f"{timestamp}\nsec".encode("utf-8"), hashlib.sha256).digest()
+            )
+        )
+        url = request.call_args.args[1]
+        self.assertIn(f"timestamp={timestamp}", url)
+        self.assertIn(f"sign={expected_sign}", url)
+        self.assertEqual(request.call_args.kwargs["json"]["text"]["content"], "标题\n\n正文")
+
+    def test_钉钉_纯token自动拼接地址(self):
+        with mock.patch.dict("os.environ", {"DINGTALK_WEBHOOK": "tok123"}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"errcode": 0})
+            ) as request:
+                notify.send("标题", "正文")
+
+        self.assertEqual(request.call_args.args[1], f"{notify.DINGTALK_API}?access_token=tok123")
+
     def test_企业微信机器人推送成功(self):
         webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc"
         with mock.patch.dict("os.environ", {"WECOM_WEBHOOK": webhook}):
@@ -79,6 +152,17 @@ class NotifyTestCase(unittest.TestCase):
         self.assertEqual(results["企业微信机器人"], "sent")
         self.assertEqual(request.call_args.args[1], webhook)
         self.assertEqual(request.call_args.kwargs["json"]["text"]["content"], "标题\n\n正文")
+
+    def test_企业微信机器人_兼容旧变量PUSH_WEBHOOK_URL(self):
+        webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=legacy"
+        with mock.patch.dict("os.environ", {"PUSH_WEBHOOK_URL": webhook}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"errcode": 0})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["企业微信机器人"], "sent")
+        self.assertEqual(request.call_args.args[1], webhook)
 
     def test_企业微信应用先取token再发消息(self):
         env = {"WECOM_CORPID": "corp", "WECOM_CORPSECRET": "secret", "WECOM_AGENTID": "1000002"}
@@ -93,6 +177,92 @@ class NotifyTestCase(unittest.TestCase):
         self.assertEqual(send_call.kwargs["params"]["access_token"], "tk")
         self.assertEqual(send_call.kwargs["json"]["agentid"], 1000002)
         self.assertEqual(send_call.kwargs["json"]["touser"], "@all")
+
+    def test_bark_完整地址解析服务器与设备key(self):
+        with mock.patch.dict("os.environ", {"BARK_URL": "https://api.day.app/devicekey"}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 200})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["Bark"], "sent")
+        self.assertEqual(request.call_args.args[1], "https://api.day.app/push")
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload["device_key"], "devicekey")
+        self.assertEqual(payload["title"], "标题")
+        self.assertEqual(payload["body"], "正文")
+
+    def test_bark_纯key使用默认服务器(self):
+        with mock.patch.dict("os.environ", {"BARK_URL": "devicekey"}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 200})
+            ) as request:
+                notify.send("标题", "正文")
+
+        self.assertEqual(request.call_args.args[1], f"{notify.BARK_DEFAULT_SERVER}/push")
+        self.assertEqual(request.call_args.kwargs["json"]["device_key"], "devicekey")
+
+    def test_serverchan_turbo(self):
+        with mock.patch.dict("os.environ", {"SERVERCHAN_KEY": "SCT123"}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 0})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["Server酱"], "sent")
+        self.assertEqual(request.call_args.args[1], "https://sctapi.ftqq.com/SCT123.send")
+        self.assertEqual(request.call_args.kwargs["data"]["title"], "标题")
+
+    def test_serverchan_3按Key前缀路由到ft07(self):
+        key = "sctp1234tabcdef"
+        with mock.patch.dict("os.environ", {"SERVERCHAN_KEY": key}):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 0})
+            ) as request:
+                notify.send("标题", "正文")
+
+        self.assertEqual(request.call_args.args[1], f"https://1234.push.ft07.com/send/{key}.send")
+
+    def test_pushplus_推送成功并携带topic(self):
+        env = {"PUSHPLUS_TOKEN": "tk", "PUSHPLUS_TOPIC": "grp"}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"code": 200})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["PushPlus"], "sent")
+        payload = request.call_args.kwargs["json"]
+        self.assertEqual(payload["token"], "tk")
+        self.assertEqual(payload["topic"], "grp")
+        self.assertEqual(payload["template"], "txt")
+
+    def test_ntfy_标题按RFC2047编码(self):
+        env = {"NTFY_TOPIC": "mytopic", "NTFY_PRIORITY": "4"}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"id": "x"})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["ntfy"], "sent")
+        self.assertEqual(request.call_args.args[1], "https://ntfy.sh/mytopic")
+        headers = request.call_args.kwargs["headers"]
+        expected_title = "=?utf-8?B?" + base64.b64encode("标题".encode("utf-8")).decode("utf-8") + "?="
+        self.assertEqual(headers["Title"], expected_title)
+        self.assertEqual(headers["Priority"], "4")
+
+    def test_gotify_推送成功(self):
+        env = {"GOTIFY_URL": "https://gotify.example.com", "GOTIFY_TOKEN": "tk"}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"id": 1})
+            ) as request:
+                results = notify.send("标题", "正文")
+
+        self.assertEqual(results["Gotify"], "sent")
+        self.assertEqual(request.call_args.args[1], "https://gotify.example.com/message?token=tk")
+        self.assertEqual(request.call_args.kwargs["json"]["message"], "正文")
 
     def test_单渠道失败不影响其他渠道(self):
         env = {
