@@ -43,7 +43,20 @@
 | ntfy | `NTFY_TOPIC` | 可选 `NTFY_URL`（自建实例）、`NTFY_PRIORITY` |
 | Gotify | `GOTIFY_URL` + `GOTIFY_TOKEN` | 可选 `GOTIFY_PRIORITY` |
 
-原面板仓库的 `RAILGUN_PUSH_WEBHOOK_URL`（Railgun 单独推送）已弃用——通知统一走上表渠道，该 secret 可直接删除。
+### 按站点单独配置（可选）
+
+上表是所有站点共用的默认渠道。如果想让某个站点推送到不同地址，给变量名加上站点前缀即可：
+
+| 站点 | 变量前缀 | 例（企微机器人地址） |
+|---|---|---|
+| GLaDOS | `GLADOS_` | `GLADOS_WECOM_WEBHOOK` |
+| Railgun | `RAILGUN_` | `RAILGUN_WECOM_WEBHOOK` |
+| NodeSeek / DeepFlood（同一条汇总消息） | `NODESEEK_` | `NODESEEK_WECOM_WEBHOOK` |
+| linux.sb | `LINUXSB_` | `LINUXSB_WECOM_WEBHOOK` |
+
+规则：**站点级变量优先于全局变量，且只覆盖配置了的那部分**——例如配了 `GLADOS_WECOM_WEBHOOK` 后，GLaDOS 的企微推送走新地址，而 GLaDOS 的 Telegram 等未配站点级的渠道仍走全局配置。所有渠道的所有变量都支持前缀（如 `GLADOS_TG_BOT_TOKEN` + `GLADOS_TG_USER_ID`、`LINUXSB_BARK_URL`）。
+
+原面板仓库的 `RAILGUN_PUSH_WEBHOOK_URL` 保留兼容：它等价于 `RAILGUN_WECOM_WEBHOOK`（Railgun 站点级企微地址），配置过就自动按站点级地址生效。
 
 ## 开启 / 关闭某个服务
 

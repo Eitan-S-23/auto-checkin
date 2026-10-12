@@ -97,6 +97,7 @@ class RunTestCase(unittest.TestCase):
 
         send.assert_called_once()
         title, content = send.call_args.args
+        self.assertEqual(send.call_args.kwargs["scope"], "GLADOS")
         self.assertIn("GLaDOS", title)
         self.assertIn("a@b.c", content)
         self.assertIn("签到成功", content)

@@ -5,6 +5,10 @@
 GLaDOS / Railgun / NodeSeek / DeepFlood / linux.sb 全部签到任务共用本模块：
 在仓库 Secrets 里配置任意渠道即可生效，变量清单见各渠道函数与 README。
 
+支持站点级覆盖：变量名前加站点前缀（GLADOS_ / RAILGUN_ / NODESEEK_ / LINUXSB_），
+例如配置 GLADOS_WECOM_WEBHOOK 后 GLaDOS 的推送只走该地址；
+站点级未配置时回退全局变量（如 WECOM_WEBHOOK），两者都没有则跳过该渠道。
+
 支持渠道（渠道 API 协议参照 Sitoi/dailycheckin 等同型开源项目核对）：
 - Telegram Bot（TG_BOT_TOKEN + TG_USER_ID，可选 TG_API_HOST / TG_PROXY）
 - 飞书群机器人（FEISHU_WEBHOOK：完整地址或纯 key）
@@ -48,10 +52,16 @@ PUSHPLUS_API = "https://www.pushplus.plus/send"
 NTFY_DEFAULT_SERVER = "https://ntfy.sh"
 
 
-def _env(*names, default=""):
-    """按顺序取第一个非空环境变量，用于兼容多种命名习惯；顺带清理复制配置时残留的首尾引号。"""
-    for name in names:
-        value = os.environ.get(name)
+def _env(*names, default="", scope=None):
+    """按顺序取第一个非空环境变量，用于兼容多种命名习惯；顺带清理复制配置时残留的首尾引号。
+
+    scope 非空时先逐个查找 "{SCOPE}_{NAME}"（站点级覆盖），全部未配置才回退全局名。
+    站点级与全局跨层级比较，即站点配了任何别名都优先于全局的任何别名，
+    例如 RAILGUN_PUSH_WEBHOOK_URL 优先于全局 WECOM_WEBHOOK。
+    """
+    scoped_keys = [f"{scope}_{name}" for name in names] if scope else []
+    for key in scoped_keys + list(names):
+        value = os.environ.get(key)
         if value and value.strip():
             return value.strip().strip("\"'").strip()
     return default
@@ -87,15 +97,15 @@ def _request(method, url, **kwargs):
     raise last_error
 
 
-def send_telegram(title, content):
+def send_telegram(title, content, scope=None):
     """推送到 Telegram。TG_API_HOST 可指向自建反代，TG_PROXY 走 HTTP 代理。"""
-    token = _env("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
-    chat_id = _env("TG_USER_ID", "TG_CHAT_ID", "TELEGRAM_CHAT_ID")
+    token = _env("TG_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", scope=scope)
+    chat_id = _env("TG_USER_ID", "TG_CHAT_ID", "TELEGRAM_CHAT_ID", scope=scope)
     if not token or not chat_id:
         return None
 
-    api_host = _env("TG_API_HOST", default="https://api.telegram.org").rstrip("/")
-    proxy = _env("TG_PROXY")
+    api_host = _env("TG_API_HOST", default="https://api.telegram.org", scope=scope).rstrip("/")
+    proxy = _env("TG_PROXY", scope=scope)
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     payload = {
@@ -109,9 +119,9 @@ def send_telegram(title, content):
     return True
 
 
-def send_feishu(title, content):
+def send_feishu(title, content, scope=None):
     """推送到飞书群机器人。FEISHU_WEBHOOK 可填完整 Webhook 地址或纯 key。"""
-    raw = _env("FEISHU_WEBHOOK", "FEISHU_KEY")
+    raw = _env("FEISHU_WEBHOOK", "FEISHU_KEY", scope=scope)
     if not raw:
         return None
 
@@ -128,19 +138,19 @@ def send_feishu(title, content):
     return True
 
 
-def send_dingtalk(title, content):
+def send_dingtalk(title, content, scope=None):
     """推送到钉钉群机器人。
 
     DINGTALK_WEBHOOK 可填完整地址或纯 access_token；
     安全设置选「加签」时把密钥填到 DINGTALK_SECRET，按官方算法签名。
     """
-    raw = _env("DINGTALK_WEBHOOK", "DINGTALK_ACCESS_TOKEN")
+    raw = _env("DINGTALK_WEBHOOK", "DINGTALK_ACCESS_TOKEN", scope=scope)
     if not raw:
         return None
 
     url = raw if "://" in raw else f"{DINGTALK_API}?access_token={raw}"
 
-    secret = _env("DINGTALK_SECRET")
+    secret = _env("DINGTALK_SECRET", scope=scope)
     if secret:
         timestamp = str(round(time.time() * 1000))
         string_to_sign = f"{timestamp}\n{secret}"
@@ -161,9 +171,9 @@ def send_dingtalk(title, content):
     return True
 
 
-def send_wecom_webhook(title, content):
+def send_wecom_webhook(title, content, scope=None):
     """推送到企业微信群机器人。末尾兼容旧变量 PUSH_WEBHOOK_URL（合并前面板仓库的配置）。"""
-    webhook = _env("WECOM_WEBHOOK", "WECHAT_WEBHOOK", "QYWX_WEBHOOK", "PUSH_WEBHOOK_URL")
+    webhook = _env("WECOM_WEBHOOK", "WECHAT_WEBHOOK", "QYWX_WEBHOOK", "PUSH_WEBHOOK_URL", scope=scope)
     if not webhook:
         return None
 
@@ -177,11 +187,11 @@ def send_wecom_webhook(title, content):
     return True
 
 
-def send_wecom_app(title, content):
+def send_wecom_app(title, content, scope=None):
     """推送到企业微信自建应用，默认发给应用可见范围内全部成员。"""
-    corp_id = _env("WECOM_CORPID", "QYWX_CORPID")
-    corp_secret = _env("WECOM_CORPSECRET", "QYWX_CORPSECRET")
-    agent_id = _env("WECOM_AGENTID", "QYWX_AGENTID")
+    corp_id = _env("WECOM_CORPID", "QYWX_CORPID", scope=scope)
+    corp_secret = _env("WECOM_CORPSECRET", "QYWX_CORPSECRET", scope=scope)
+    agent_id = _env("WECOM_AGENTID", "QYWX_AGENTID", scope=scope)
     if not (corp_id and corp_secret and agent_id):
         return None
 
@@ -193,7 +203,7 @@ def send_wecom_app(title, content):
         raise RuntimeError(f"企业微信获取 access_token 失败: {token_result}")
 
     payload = {
-        "touser": _env("WECOM_TOUSER", "QYWX_TOUSER", default="@all"),
+        "touser": _env("WECOM_TOUSER", "QYWX_TOUSER", default="@all", scope=scope),
         "msgtype": "text",
         "agentid": int(agent_id),
         "text": {"content": _truncate_bytes(f"{title}\n\n{content}", WECOM_TEXT_BYTES_LIMIT)},
@@ -207,12 +217,12 @@ def send_wecom_app(title, content):
     return True
 
 
-def send_bark(title, content):
+def send_bark(title, content, scope=None):
     """推送到 Bark（iOS）。
 
     BARK_URL 可填 https://服务器地址/设备Key（自建服务器同格式）或纯设备 Key。
     """
-    raw = _env("BARK_URL")
+    raw = _env("BARK_URL", scope=scope)
     if not raw:
         return None
 
@@ -234,14 +244,14 @@ def send_bark(title, content):
     return True
 
 
-def send_serverchan(title, content):
+def send_serverchan(title, content, scope=None):
     """推送到 Server酱。
 
     SERVERCHAN_KEY 支持两种 Key，按前缀自动识别：
     - sctp…t 开头为 Server酱³（推送到 https://{id}.push.ft07.com）
     - 其余按 Turbo 版（https://sctapi.ftqq.com）
     """
-    key = _env("SERVERCHAN_KEY", "SERVERCHAN_SENDKEY")
+    key = _env("SERVERCHAN_KEY", "SERVERCHAN_SENDKEY", scope=scope)
     if not key:
         return None
 
@@ -261,9 +271,9 @@ def send_serverchan(title, content):
     return True
 
 
-def send_pushplus(title, content):
+def send_pushplus(title, content, scope=None):
     """推送到 PushPlus。PUSHPLUS_TOPIC 可选（一对一推送时留空）。"""
-    token = _env("PUSHPLUS_TOKEN", "PUSHPLUS_KEY")
+    token = _env("PUSHPLUS_TOKEN", "PUSHPLUS_KEY", scope=scope)
     if not token:
         return None
 
@@ -273,7 +283,7 @@ def send_pushplus(title, content):
         "content": _truncate_chars(content, TEXT_LIMIT),
         "template": "txt",
     }
-    topic = _env("PUSHPLUS_TOPIC")
+    topic = _env("PUSHPLUS_TOPIC", scope=scope)
     if topic:
         payload["topic"] = topic
 
@@ -283,16 +293,16 @@ def send_pushplus(title, content):
     return True
 
 
-def send_ntfy(title, content):
+def send_ntfy(title, content, scope=None):
     """推送到 ntfy。NTFY_TOPIC 必填；NTFY_URL 默认官方服务，可指向自建实例。"""
-    topic = _env("NTFY_TOPIC")
+    topic = _env("NTFY_TOPIC", scope=scope)
     if not topic:
         return None
 
-    server = _env("NTFY_URL", default=NTFY_DEFAULT_SERVER).rstrip("/")
+    server = _env("NTFY_URL", default=NTFY_DEFAULT_SERVER, scope=scope).rstrip("/")
     # HTTP 头仅允许 ASCII，标题按 RFC 2047 编码（ntfy 官方支持该形式）
     encoded_title = "=?utf-8?B?" + base64.b64encode(title.encode("utf-8")).decode("utf-8") + "?="
-    headers = {"Title": encoded_title, "Priority": _env("NTFY_PRIORITY", default="3")}
+    headers = {"Title": encoded_title, "Priority": _env("NTFY_PRIORITY", default="3", scope=scope)}
     _request(
         "POST",
         f"{server}/{topic}",
@@ -302,15 +312,15 @@ def send_ntfy(title, content):
     return True
 
 
-def send_gotify(title, content):
+def send_gotify(title, content, scope=None):
     """推送到 Gotify（自建服务）。GOTIFY_URL 与 GOTIFY_TOKEN 均必填。"""
-    server = _env("GOTIFY_URL")
-    token = _env("GOTIFY_TOKEN")
+    server = _env("GOTIFY_URL", scope=scope)
+    token = _env("GOTIFY_TOKEN", scope=scope)
     if not (server and token):
         return None
 
     try:
-        priority = int(_env("GOTIFY_PRIORITY", default="3"))
+        priority = int(_env("GOTIFY_PRIORITY", default="3", scope=scope))
     except ValueError:
         priority = 3
 
@@ -339,12 +349,15 @@ CHANNELS = (
 )
 
 
-def send(title, content):
-    """向所有已配置渠道推送，返回 {渠道名: "sent"/"skipped"/错误信息}。"""
+def send(title, content, scope=None):
+    """向所有已配置渠道推送，返回 {渠道名: "sent"/"skipped"/错误信息}。
+
+    scope 为站点前缀（如 "GLADOS"），启用站点级变量覆盖；留空只用全局变量。
+    """
     results = {}
     for name, sender in CHANNELS:
         try:
-            sent = sender(title, content)
+            sent = sender(title, content, scope)
         except Exception as error:
             results[name] = f"失败: {error}"
             print(f"[通知] {name} 推送失败: {error}")

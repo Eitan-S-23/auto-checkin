@@ -32,6 +32,7 @@ jobs:
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT }}
           # 通知渠道（全部可选，配了哪个推哪个，完整说明见 README「通知渠道」）
+          # 下为全局渠道：所有站点共用；各站未配置站点级变量时回退到这里
           # PUSH_WEBHOOK_URL 为合并前面板仓库的旧变量，等同企业微信机器人渠道（WECOM_WEBHOOK 优先）
           PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -56,3 +57,53 @@ jobs:
           GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
           GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
           GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+          # ---- 站点级覆盖（全部可选）：变量名前加面板前缀（GLADOS_ / RAILGUN_）后，
+          # 该面板的推送改走自己的地址，未配置的渠道仍回退上方全局变量。
+          # 例：配 GLADOS_WECOM_WEBHOOK 则 GLaDOS 的企微推送发到该地址；
+          # RAILGUN_PUSH_WEBHOOK_URL 即原面板仓库旧变量，等同 Railgun 站点级企微地址。
+          GLADOS_TG_BOT_TOKEN: ${{ secrets.GLADOS_TG_BOT_TOKEN }}
+          GLADOS_TG_USER_ID: ${{ secrets.GLADOS_TG_USER_ID }}
+          GLADOS_TG_API_HOST: ${{ secrets.GLADOS_TG_API_HOST }}
+          GLADOS_TG_PROXY: ${{ secrets.GLADOS_TG_PROXY }}
+          GLADOS_FEISHU_WEBHOOK: ${{ secrets.GLADOS_FEISHU_WEBHOOK }}
+          GLADOS_DINGTALK_WEBHOOK: ${{ secrets.GLADOS_DINGTALK_WEBHOOK }}
+          GLADOS_DINGTALK_SECRET: ${{ secrets.GLADOS_DINGTALK_SECRET }}
+          GLADOS_WECOM_WEBHOOK: ${{ secrets.GLADOS_WECOM_WEBHOOK }}
+          GLADOS_PUSH_WEBHOOK_URL: ${{ secrets.GLADOS_PUSH_WEBHOOK_URL }}
+          GLADOS_WECOM_CORPID: ${{ secrets.GLADOS_WECOM_CORPID }}
+          GLADOS_WECOM_CORPSECRET: ${{ secrets.GLADOS_WECOM_CORPSECRET }}
+          GLADOS_WECOM_AGENTID: ${{ secrets.GLADOS_WECOM_AGENTID }}
+          GLADOS_WECOM_TOUSER: ${{ secrets.GLADOS_WECOM_TOUSER }}
+          GLADOS_BARK_URL: ${{ secrets.GLADOS_BARK_URL }}
+          GLADOS_SERVERCHAN_KEY: ${{ secrets.GLADOS_SERVERCHAN_KEY }}
+          GLADOS_PUSHPLUS_TOKEN: ${{ secrets.GLADOS_PUSHPLUS_TOKEN }}
+          GLADOS_PUSHPLUS_TOPIC: ${{ secrets.GLADOS_PUSHPLUS_TOPIC }}
+          GLADOS_NTFY_URL: ${{ secrets.GLADOS_NTFY_URL }}
+          GLADOS_NTFY_TOPIC: ${{ secrets.GLADOS_NTFY_TOPIC }}
+          GLADOS_NTFY_PRIORITY: ${{ secrets.GLADOS_NTFY_PRIORITY }}
+          GLADOS_GOTIFY_URL: ${{ secrets.GLADOS_GOTIFY_URL }}
+          GLADOS_GOTIFY_TOKEN: ${{ secrets.GLADOS_GOTIFY_TOKEN }}
+          GLADOS_GOTIFY_PRIORITY: ${{ secrets.GLADOS_GOTIFY_PRIORITY }}
+          RAILGUN_TG_BOT_TOKEN: ${{ secrets.RAILGUN_TG_BOT_TOKEN }}
+          RAILGUN_TG_USER_ID: ${{ secrets.RAILGUN_TG_USER_ID }}
+          RAILGUN_TG_API_HOST: ${{ secrets.RAILGUN_TG_API_HOST }}
+          RAILGUN_TG_PROXY: ${{ secrets.RAILGUN_TG_PROXY }}
+          RAILGUN_FEISHU_WEBHOOK: ${{ secrets.RAILGUN_FEISHU_WEBHOOK }}
+          RAILGUN_DINGTALK_WEBHOOK: ${{ secrets.RAILGUN_DINGTALK_WEBHOOK }}
+          RAILGUN_DINGTALK_SECRET: ${{ secrets.RAILGUN_DINGTALK_SECRET }}
+          RAILGUN_WECOM_WEBHOOK: ${{ secrets.RAILGUN_WECOM_WEBHOOK }}
+          RAILGUN_PUSH_WEBHOOK_URL: ${{ secrets.RAILGUN_PUSH_WEBHOOK_URL }}
+          RAILGUN_WECOM_CORPID: ${{ secrets.RAILGUN_WECOM_CORPID }}
+          RAILGUN_WECOM_CORPSECRET: ${{ secrets.RAILGUN_WECOM_CORPSECRET }}
+          RAILGUN_WECOM_AGENTID: ${{ secrets.RAILGUN_WECOM_AGENTID }}
+          RAILGUN_WECOM_TOUSER: ${{ secrets.RAILGUN_WECOM_TOUSER }}
+          RAILGUN_BARK_URL: ${{ secrets.RAILGUN_BARK_URL }}
+          RAILGUN_SERVERCHAN_KEY: ${{ secrets.RAILGUN_SERVERCHAN_KEY }}
+          RAILGUN_PUSHPLUS_TOKEN: ${{ secrets.RAILGUN_PUSHPLUS_TOKEN }}
+          RAILGUN_PUSHPLUS_TOPIC: ${{ secrets.RAILGUN_PUSHPLUS_TOPIC }}
+          RAILGUN_NTFY_URL: ${{ secrets.RAILGUN_NTFY_URL }}
+          RAILGUN_NTFY_TOPIC: ${{ secrets.RAILGUN_NTFY_TOPIC }}
+          RAILGUN_NTFY_PRIORITY: ${{ secrets.RAILGUN_NTFY_PRIORITY }}
+          RAILGUN_GOTIFY_URL: ${{ secrets.RAILGUN_GOTIFY_URL }}
+          RAILGUN_GOTIFY_TOKEN: ${{ secrets.RAILGUN_GOTIFY_TOKEN }}
+          RAILGUN_GOTIFY_PRIORITY: ${{ secrets.RAILGUN_GOTIFY_PRIORITY }}

@@ -4,6 +4,7 @@
 用桩替换 requests.request，覆盖以下场景：
 - 未配置渠道时全部跳过
 - 各渠道正常推送（含钉钉加签、Server酱两种 Key、Bark 地址解析、旧变量兼容）
+- 站点级覆盖（{SCOPE}_{变量名} 优先于全局变量，未配置部分回退全局）
 - 接口返回业务错误时标记失败且不影响其他渠道
 - 超长内容按字符数与字节数截断
 """
@@ -39,6 +40,10 @@ ENV_KEYS = (
     "GOTIFY_URL", "GOTIFY_TOKEN", "GOTIFY_PRIORITY",
 )
 
+# 站点级覆盖变量（{SCOPE}_{变量名}），与全局变量一并清空避免真实配置干扰
+_SCOPES = ("GLADOS", "RAILGUN", "NODESEEK", "LINUXSB")
+ALL_ENV_KEYS = ENV_KEYS + tuple(f"{scope}_{key}" for scope in _SCOPES for key in ENV_KEYS)
+
 
 class FakeResponse:
     """模拟 requests.Response，仅实现被 notify 使用的接口。"""
@@ -55,7 +60,7 @@ class FakeResponse:
 
 class NotifyTestCase(unittest.TestCase):
     def setUp(self):
-        patcher = mock.patch.dict("os.environ", {key: "" for key in ENV_KEYS}, clear=False)
+        patcher = mock.patch.dict("os.environ", {key: "" for key in ALL_ENV_KEYS}, clear=False)
         patcher.start()
         self.addCleanup(patcher.stop)
         # 重试等待会拖慢测试，直接跳过 sleep
@@ -163,6 +168,92 @@ class NotifyTestCase(unittest.TestCase):
 
         self.assertEqual(results["企业微信机器人"], "sent")
         self.assertEqual(request.call_args.args[1], webhook)
+
+    # ---- 站点级覆盖：{SCOPE}_{变量名} 优先于全局变量，未配置则回退 ----
+
+    def test_站点级覆盖_telegram优先于全局(self):
+        env = {
+            "TG_BOT_TOKEN": "global_token", "TG_USER_ID": "111",
+            "GLADOS_TG_BOT_TOKEN": "glados_token", "GLADOS_TG_USER_ID": "222",
+        }
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"ok": True})
+            ) as request:
+                results = notify.send("标题", "正文", scope="GLADOS")
+
+        self.assertEqual(results["Telegram"], "sent")
+        self.assertEqual(
+            request.call_args.args[1], "https://api.telegram.org/botglados_token/sendMessage"
+        )
+        self.assertEqual(request.call_args.kwargs["json"]["chat_id"], "222")
+
+    def test_站点级未配置时回退全局(self):
+        env = {"TG_BOT_TOKEN": "global_token", "TG_USER_ID": "111"}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"ok": True})
+            ) as request:
+                results = notify.send("标题", "正文", scope="GLADOS")
+
+        self.assertEqual(results["Telegram"], "sent")
+        self.assertEqual(
+            request.call_args.args[1], "https://api.telegram.org/botglobal_token/sendMessage"
+        )
+
+    def test_站点级覆盖_企业微信机器人各站不同地址(self):
+        global_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=global"
+        glados_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=glados"
+        env = {"WECOM_WEBHOOK": global_webhook, "GLADOS_WECOM_WEBHOOK": glados_webhook}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"errcode": 0})
+            ) as request:
+                notify.send("标题", "正文", scope="GLADOS")
+                self.assertEqual(request.call_args.args[1], glados_webhook)
+
+                notify.send("标题", "正文")
+                self.assertEqual(request.call_args.args[1], global_webhook)
+
+    def test_站点级覆盖_旧别名也优先于全局规范名(self):
+        # RAILGUN_PUSH_WEBHOOK_URL 是原面板仓库旧变量，作为站点级别名应压过全局 WECOM_WEBHOOK
+        global_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=global"
+        railgun_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=railgun"
+        env = {"WECOM_WEBHOOK": global_webhook, "RAILGUN_PUSH_WEBHOOK_URL": railgun_webhook}
+        with mock.patch.dict("os.environ", env):
+            with mock.patch(
+                "notify.requests.request", return_value=FakeResponse({"errcode": 0})
+            ) as request:
+                notify.send("标题", "正文", scope="RAILGUN")
+                self.assertEqual(request.call_args.args[1], railgun_webhook)
+
+                notify.send("标题", "正文", scope="GLADOS")
+                self.assertEqual(request.call_args.args[1], global_webhook)
+
+    def test_站点级仅覆盖部分渠道_其余回退全局(self):
+        env = {
+            "TG_BOT_TOKEN": "global_token", "TG_USER_ID": "111",
+            "BARK_URL": "https://api.day.app/globalkey",
+            "GLADOS_BARK_URL": "https://api.day.app/gladoskey",
+        }
+        responses = [FakeResponse({"ok": True}), FakeResponse({"code": 200})]
+        with mock.patch.dict("os.environ", env):
+            with mock.patch("notify.requests.request", side_effect=responses) as request:
+                results = notify.send("标题", "正文", scope="GLADOS")
+
+        self.assertEqual(results["Telegram"], "sent")
+        self.assertEqual(results["Bark"], "sent")
+        # 第 1 个请求是 Telegram：未配站点级，回退全局 token
+        self.assertIn("global_token", request.call_args_list[0].args[1])
+        # 第 2 个请求是 Bark：走 GLADOS_BARK_URL 站点级地址
+        self.assertEqual(request.call_args_list[1].args[1], "https://api.day.app/push")
+        self.assertEqual(request.call_args_list[1].kwargs["json"]["device_key"], "gladoskey")
+
+    def test_站点级_未配置任何渠道时全部跳过(self):
+        with mock.patch("notify.requests.request") as request:
+            results = notify.send("标题", "正文", scope="GLADOS")
+        request.assert_not_called()
+        self.assertEqual(results, {name: "skipped" for name, _ in notify.CHANNELS})
 
     def test_企业微信应用先取token再发消息(self):
         env = {"WECOM_CORPID": "corp", "WECOM_CORPSECRET": "secret", "WECOM_AGENTID": "1000002"}

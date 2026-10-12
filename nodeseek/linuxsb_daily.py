@@ -1246,7 +1246,7 @@ def run():
     # 通知不输出站点域名与任务开始时间：linux.sb 只有一站，任务的开始时间
     # 与本账号的签到时间语义重叠且相差随机延迟，只保留账号级「签到时间」
     content = "\n\n".join(sections)
-    notify.send(title, content)
+    notify.send(title, content, scope="LINUXSB")
     return 0 if all_success else 1
 
 
@@ -1257,7 +1257,7 @@ def main():
     except Exception:
         print("脚本发生未预期异常:")
         traceback.print_exc()
-        notify.send("LinuxSB 每日任务异常", "脚本执行中断，请查看日志排查")
+        notify.send("LinuxSB 每日任务异常", "脚本执行中断，请查看日志排查", scope="LINUXSB")
         return 1
 
 

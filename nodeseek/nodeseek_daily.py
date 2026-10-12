@@ -977,14 +977,14 @@ def run():
     task_started_at = time.strftime('%Y-%m-%d %H:%M:%S')
     sites = load_sites()
     if not sites:
-        notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）")
+        notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）", scope="NODESEEK")
         return 1
 
     # 多站点共用同一个浏览器实例，避免重复启动 Chrome
     driver = create_driver()
     if not driver:
         print("浏览器初始化失败")
-        notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境")
+        notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境", scope="NODESEEK")
         return 1
 
     site_results = []
@@ -1046,7 +1046,7 @@ def run():
 
     all_success = all(r[1]["success"] for r in site_results)
     title = "NodeSeek 每日任务" + ("" if all_success else "（签到异常）")
-    notify.send(title, build_notify_content(site_results, task_started_at))
+    notify.send(title, build_notify_content(site_results, task_started_at), scope="NODESEEK")
     return 0 if all_success else 1
 
 
@@ -1058,7 +1058,7 @@ def main():
         # run 内部已对已知失败路径做了处理，这里只兜底真正未捕获的异常
         print("脚本发生未预期异常:")
         traceback.print_exc()
-        notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查")
+        notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查", scope="NODESEEK")
         return 1
 
 

@@ -29,7 +29,9 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 )
 
-# 面板配置：accounts_env 为空即视为未启用该面板，静默跳过
+# 面板配置：accounts_env 为空即视为未启用该面板，静默跳过。
+# notify_scope 为通知站点前缀：配了 GLADOS_/RAILGUN_ 开头的渠道变量时
+# 该面板走自己的推送地址，未配则回退全局渠道变量（见仓库根 notify.py）。
 PANELS = [
     {
         "name": "GLaDOS",
@@ -37,6 +39,7 @@ PANELS = [
         "token": "glados.cloud",
         "accounts_env": "GLADOS_ACCOUNTS_JSON",
         "ua_env": "GLADOS_USER_AGENT",
+        "notify_scope": "GLADOS",
     },
     {
         "name": "Railgun",
@@ -44,6 +47,7 @@ PANELS = [
         "token": "railgun.info",
         "accounts_env": "RAILGUN_ACCOUNTS_JSON",
         "ua_env": "RAILGUN_USER_AGENT",
+        "notify_scope": "RAILGUN",
     },
 ]
 
@@ -206,7 +210,7 @@ def run():
             continue
         processed += 1
         title, content = result
-        notify.send(title, content)
+        notify.send(title, content, scope=panel["notify_scope"])
 
     if processed == 0:
         print("所有面板均未配置，无签到任务")
