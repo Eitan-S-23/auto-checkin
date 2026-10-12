@@ -59,10 +59,9 @@ jobs:
           GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
           # ---- 站点级覆盖（全部可选）：变量名前加面板前缀（GLADOS_ / RAILGUN_）后，
           # 该面板的推送改走自己的地址，未配置的渠道仍回退上方全局变量。
-          # GLaDOS 的企微地址：未单独配置 GLADOS_WECOM_WEBHOOK 时复用 PUSH_WEBHOOK_URL
-          # （与 Railgun 同群的旧地址，不回退到全局 WECOM_WEBHOOK）；想换群就新建
-          # GLADOS_WECOM_WEBHOOK secret 覆盖。
-          # RAILGUN_PUSH_WEBHOOK_URL 即原面板仓库旧变量，等同 Railgun 站点级企微地址。
+          # GLaDOS 与 Railgun 的企微地址：未单独配置各自的 *_WECOM_WEBHOOK 时，
+          # 默认复用 PUSH_WEBHOOK_URL（两站同群的旧地址，不回退到全局 WECOM_WEBHOOK）；
+          # 想换群就新建对应的 GLADOS_WECOM_WEBHOOK / RAILGUN_WECOM_WEBHOOK secret 覆盖。
           GLADOS_TG_BOT_TOKEN: ${{ secrets.GLADOS_TG_BOT_TOKEN }}
           GLADOS_TG_USER_ID: ${{ secrets.GLADOS_TG_USER_ID }}
           GLADOS_TG_API_HOST: ${{ secrets.GLADOS_TG_API_HOST }}
@@ -93,8 +92,7 @@ jobs:
           RAILGUN_FEISHU_WEBHOOK: ${{ secrets.RAILGUN_FEISHU_WEBHOOK }}
           RAILGUN_DINGTALK_WEBHOOK: ${{ secrets.RAILGUN_DINGTALK_WEBHOOK }}
           RAILGUN_DINGTALK_SECRET: ${{ secrets.RAILGUN_DINGTALK_SECRET }}
-          RAILGUN_WECOM_WEBHOOK: ${{ secrets.RAILGUN_WECOM_WEBHOOK }}
-          RAILGUN_PUSH_WEBHOOK_URL: ${{ secrets.RAILGUN_PUSH_WEBHOOK_URL }}
+          RAILGUN_WECOM_WEBHOOK: ${{ secrets.RAILGUN_WECOM_WEBHOOK || secrets.PUSH_WEBHOOK_URL }}
           RAILGUN_WECOM_CORPID: ${{ secrets.RAILGUN_WECOM_CORPID }}
           RAILGUN_WECOM_CORPSECRET: ${{ secrets.RAILGUN_WECOM_CORPSECRET }}
           RAILGUN_WECOM_AGENTID: ${{ secrets.RAILGUN_WECOM_AGENTID }}

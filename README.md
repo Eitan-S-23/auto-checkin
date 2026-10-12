@@ -56,7 +56,7 @@
 
 规则：**站点级变量优先于全局变量，且只覆盖配置了的那部分**——例如配了 `GLADOS_WECOM_WEBHOOK` 后，GLaDOS 的企微推送走新地址，而 GLaDOS 的 Telegram 等未配站点级的渠道仍走全局配置。所有渠道的所有变量都支持前缀（如 `GLADOS_TG_BOT_TOKEN` + `GLADOS_TG_USER_ID`、`LINUXSB_BARK_URL`）。
 
-原面板仓库的 `RAILGUN_PUSH_WEBHOOK_URL` 保留兼容：它等价于 `RAILGUN_WECOM_WEBHOOK`（Railgun 站点级企微地址），配置过就自动按站点级地址生效。
+原面板仓库的旧变量 `RAILGUN_PUSH_WEBHOOK_URL` 已删除——Railgun 的企微地址现由站点级变量 `RAILGUN_WECOM_WEBHOOK` 承担（默认复用 `PUSH_WEBHOOK_URL` 的值，与 GLaDOS 同群）。
 
 ## 开启 / 关闭某个服务
 

@@ -215,8 +215,8 @@ class NotifyTestCase(unittest.TestCase):
                 notify.send("标题", "正文")
                 self.assertEqual(request.call_args.args[1], global_webhook)
 
-    def test_站点级覆盖_旧别名也优先于全局规范名(self):
-        # RAILGUN_PUSH_WEBHOOK_URL 是原面板仓库旧变量，作为站点级别名应压过全局 WECOM_WEBHOOK
+    def test_站点级覆盖_站点级别名优先于全局规范名(self):
+        # 站点级使用兼容别名（PUSH_WEBHOOK_URL 加前缀）也应压过全局规范名 WECOM_WEBHOOK
         global_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=global"
         railgun_webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=railgun"
         env = {"WECOM_WEBHOOK": global_webhook, "RAILGUN_PUSH_WEBHOOK_URL": railgun_webhook}
