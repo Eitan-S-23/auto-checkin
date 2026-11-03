@@ -17,6 +17,9 @@
 - `panels.yml` —— GLaDOS + Railgun（API 签到，curl_cffi）
 - `daily.yml` —— NodeSeek + DeepFlood + linux.sb（浏览器过盾）
 
+GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及排障方法见
+[`panels/README.md`](panels/README.md)。
+
 ## Secrets 清单（账号类）
 
 | 名称 | 用途 |
@@ -69,4 +72,5 @@
 
 - 本仓库由原 `glados-auto-checkin`、`railgun`、`NodeSeek-DeepFlood-LinuxSB-Checkin` 三个仓库合并而来；NodeSeek 部分保留了完整 git 历史，位于 `nodeseek/`。
 - 通知模块统一位于根目录 `notify.py`，本地调试用的环境变量样例见 [`nodeseek/.env.example`](nodeseek/.env.example)。
+- GLaDOS / Railgun 的详细配置见 [`panels/README.md`](panels/README.md)；面板脚本直接读取环境变量，不自动加载 `.env`。
 - NodeSeek / DeepFlood / linux.sb 的详细说明与本地调试方法见 [`nodeseek/README.md`](nodeseek/README.md)。

@@ -47,6 +47,56 @@ class TranslateMessageTestCase(unittest.TestCase):
         self.assertIn("未知", checkin.translate_message("Something new"))
 
 
+class CookieHeaderCompatibilityTestCase(unittest.TestCase):
+    def setUp(self):
+        keys = {panel["ua_env"]: "" for panel in checkin.PANELS}
+        patcher = mock.patch.dict("os.environ", keys, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_current_session_names_are_forwarded_unchanged(self):
+        cookie = "gld:sess=opaque-session-v2; gld:sess.sig=opaque-signature"
+        for panel in checkin.PANELS:
+            with self.subTest(panel=panel["name"]):
+                self.assertEqual(checkin.generate_headers(cookie, panel)["Cookie"], cookie)
+
+    def test_legacy_session_names_are_not_renamed(self):
+        cookie = "koa:sess=legacy-session; koa:sess.sig=legacy-signature"
+        headers = checkin.generate_headers(cookie, checkin.PANELS[0])
+        self.assertEqual(headers["Cookie"], cookie)
+        self.assertNotIn("gld:", headers["Cookie"])
+
+    def test_opaque_cookie_values_are_not_decoded_or_rewritten(self):
+        cookie = "gld:sess=opaque.v2_a-b+/==; gld:sess.sig=signed-value%2B%3D"
+        headers = checkin.generate_headers(cookie, checkin.PANELS[0])
+        self.assertEqual(headers["Cookie"], cookie)
+
+    def test_additional_cookie_fields_are_preserved(self):
+        cookie = "theme=light; gld:sess=session; gld:sess.sig=signature; preference=en"
+        self.assertEqual(checkin.generate_headers(cookie, checkin.PANELS[0])["Cookie"], cookie)
+
+    def test_panel_user_agent_overrides_are_independent(self):
+        values = {"GLADOS_USER_AGENT": "glados-browser", "RAILGUN_USER_AGENT": "railgun-browser"}
+        with mock.patch.dict("os.environ", values):
+            for panel in checkin.PANELS:
+                headers = checkin.generate_headers("session=value", panel)
+                self.assertEqual(headers["User-Agent"], values[panel["ua_env"]])
+                self.assertEqual(headers["Origin"], panel["origin"])
+
+    def test_sign_sends_current_cookie_and_matching_panel_token(self):
+        cookie = "gld:sess=opaque-session; gld:sess.sig=opaque-signature"
+        for panel in checkin.PANELS:
+            with self.subTest(panel=panel["name"]), mock.patch("checkin.create_retry_session") as create:
+                session = create.return_value
+                session.post.return_value.json.return_value = {"message": "Checkin! Got 3 Points"}
+                self.assertIn("3", checkin.sign(panel, cookie))
+                session.post.assert_called_once()
+                args, kwargs = session.post.call_args
+                self.assertEqual(args, (panel["origin"] + "/api/user/checkin",))
+                self.assertEqual(kwargs["headers"]["Cookie"], cookie)
+                self.assertEqual(kwargs["json"], {"token": panel["token"]})
+
+
 class CheckinPanelTestCase(unittest.TestCase):
     def setUp(self):
         keys = [panel["accounts_env"] for panel in checkin.PANELS]
