@@ -20,6 +20,8 @@
 GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及排障方法见
 [`panels/README.md`](panels/README.md)。
 
+面板脚本兼容原有 `email` + `cookie` 配置，可选增加账号级 `user_agent` / `impersonate`，无需批量重配。每个账号独立 HTTP Session，同账号复用连接和内存 Cookie 更新，但不提供独立浏览器/IP、不写回 Secrets。临时网络错误有限重试；任一账号或通知失败使工作流标红。手动运行勾选 `diagnose_only` 可只读查询登录状态，不签到、不推送。
+
 ## Secrets 清单（账号类）
 
 | 名称 | 用途 |
@@ -65,8 +67,7 @@ GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及�
 
 1. **单个服务**：删除或清空对应 secret → 脚本自动跳过（推荐）；
 2. **整个 workflow**：Actions 页面 Disable，或 `gh workflow disable panels.yml`；
-3. **面板登录设备不一致时**：给对应面板配置 vars `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT` 覆盖默认 UA。
-   注意：GLaDOS 系面板会校验签到请求客户端与登录设备平台一致，UA 与登录设备不一致会被反自动化检测拦截、积分被拒，默认固定为 Windows Chrome UA。
+3. **面板登录设备不一致时**：给对应面板配置 vars `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT`，或给账号 JSON 增加可选 `user_agent` 字段覆盖默认 Windows Chrome 124 UA。账号级设置优先，既有面板 UA 保持原值；UA 和近似传输预设不能保证完整浏览器指纹一致。
 
 ## 其他说明
 

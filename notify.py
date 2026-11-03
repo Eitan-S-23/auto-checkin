@@ -359,8 +359,8 @@ def send(title, content, scope=None):
         try:
             sent = sender(title, content, scope)
         except Exception as error:
-            results[name] = f"失败: {error}"
-            print(f"[通知] {name} 推送失败: {error}")
+            results[name] = f"失败: {type(error).__name__}"
+            print(f"[通知] {name} 推送失败: {type(error).__name__}")
             continue
 
         if sent is None:

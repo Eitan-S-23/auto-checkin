@@ -4,10 +4,23 @@ on:
   schedule:
     - cron: '0 */8 * * *'
   workflow_dispatch:
+    inputs:
+      diagnose_only:
+        description: 仅查询账号状态，不签到、不推送、不修改 Secret
+        type: boolean
+        default: false
+
+concurrency:
+  group: panels-checkin-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   checkin:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,6 +35,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests curl_cffi
 
+      - name: Run offline regression tests
+        run: |
+          python -B -m unittest discover -s panels -p 'test_*.py'
+          python -B -m unittest discover -s nodeseek -p 'test_notify.py'
+
       - name: Run checkin
         run: python panels/checkin.py
         env:
@@ -31,6 +49,10 @@ jobs:
           # 面板级 UA 覆盖（可选 vars）：某站需要与登录设备一致的其他平台 UA 时再配置
           GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
           RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT }}
+          # 请求层有限重试：空值使用脚本默认值（3 次，间隔 10/20 秒）
+          PANEL_MAX_ATTEMPTS: ${{ vars.PANEL_MAX_ATTEMPTS }}
+          PANEL_RETRY_DELAY_SECONDS: ${{ vars.PANEL_RETRY_DELAY_SECONDS }}
+          PANEL_DIAGNOSTIC_ONLY: ${{ inputs.diagnose_only && 'true' || 'false' }}
           # 通知渠道（全部可选，配了哪个推哪个，完整说明见 README「通知渠道」）
           # 下为全局渠道：所有站点共用；各站未配置站点级变量时回退到这里
           # PUSH_WEBHOOK_URL 为合并前面板仓库的旧变量，等同企业微信机器人渠道（WECOM_WEBHOOK 优先）

@@ -382,7 +382,17 @@ class NotifyTestCase(unittest.TestCase):
                 results = notify.send("标题", "正文")
 
         self.assertEqual(request.call_count, notify.MAX_RETRY)
-        self.assertIn("连接超时", results["Telegram"])
+        self.assertIn("RuntimeError", results["Telegram"])
+
+    def test_error_logs_and_results_redact_credentials(self):
+        private = "https://example.com/hook/private-key Cookie=private-session user@example.com"
+        with mock.patch.dict("os.environ", {"TG_BOT_TOKEN": "private-key", "TG_USER_ID": "1"}), \
+                mock.patch("notify.requests.request", side_effect=RuntimeError(private)), \
+                mock.patch("builtins.print") as output:
+            results = notify.send("title", "content")
+        self.assertEqual(results["Telegram"], "失败: RuntimeError")
+        for secret in ("private-key", "private-session", "user@example.com"):
+            self.assertNotIn(secret, str(results) + str(output.call_args_list))
 
     def test_超长内容按字符数截断(self):
         long_text = "长" * 5000
