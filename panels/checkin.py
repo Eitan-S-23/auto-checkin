@@ -39,6 +39,12 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+RECORDED_CHECKIN_MESSAGES = {
+    "Checkin Repeats! Please Try Tomorrow": "重复签到，请明天再试",
+    "Today's observation logged. Return tomorrow for more points.": "今日已签到",
+    "Already checked in today. Come back tomorrow.": "今日已签到",
+}
+
 # 面板配置：accounts_env 为空即视为未启用该面板，静默跳过。
 # notify_scope 为通知站点前缀：配了 GLADOS_/RAILGUN_ 开头的渠道变量时
 # 该面板走自己的推送地址，未配则回退全局渠道变量（见仓库根 notify.py）。
@@ -87,10 +93,8 @@ def translate_message(raw_message):
         return "签到失败，请明天再试"
     elif match := re.search(r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?\b", raw_message, re.I):
         return f"签到成功，获得{match.group(1)}积分"
-    elif raw_message == "Checkin Repeats! Please Try Tomorrow":
-        return "重复签到，请明天再试"
-    elif raw_message == "Today's observation logged. Return tomorrow for more points.":
-        return "今日已签到"
+    elif raw_message in RECORDED_CHECKIN_MESSAGES:
+        return RECORDED_CHECKIN_MESSAGES[raw_message]
     elif "please checkin via" in raw_message:
         return "签到失败，请更新Cookie"
     else:
@@ -457,7 +461,7 @@ def sign(panel, cookie, client=None):
         data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, client=client)
         msg = data.get("message", "")
         normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?[.!]?", msg.strip(), re.I)
-        repeated = msg in ("Checkin Repeats! Please Try Tomorrow", "Today's observation logged. Return tomorrow for more points.")
+        repeated = isinstance(msg, str) and msg in RECORDED_CHECKIN_MESSAGES
         if not ((data.get("code") in (None, 0, "0") and normal) or
                 (data.get("code") in (None, 0, "0", 1, "1") and repeated)):
             raise PanelRequestError("签到接口未返回明确成功或已签到结果，请核对官网", kind="business")

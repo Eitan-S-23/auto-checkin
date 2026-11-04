@@ -53,6 +53,7 @@ class TranslateMessageTestCase(unittest.TestCase):
             "Please Try Tomorrow": "明天再试",
             "Checkin Repeats! Please Try Tomorrow": "重复签到",
             "Today's observation logged. Return tomorrow for more points.": "已签到",
+            "Already checked in today. Come back tomorrow.": "已签到",
         }
         for raw, expected in cases.items():
             self.assertIn(expected, checkin.translate_message(raw))
@@ -544,6 +545,41 @@ class AccountClientTestCase(unittest.TestCase):
                 result = checkin.process_account(self.panel, {"cookie": self.cookie})
                 self.assertFalse(result.success)
                 self.assertNotIn("private-session", result.message)
+                self.session.get.assert_not_called()
+        self.sleep.assert_not_called()
+
+    def test_railgun_already_checked_in_continues_status_and_points_without_retry(self):
+        panel = next(panel for panel in checkin.PANELS if panel["name"] == "Railgun")
+        for code in (None, 0, "0", 1, "1"):
+            with self.subTest(code=code):
+                self.session.reset_mock()
+                self.session.post.return_value = self.response(data={
+                    "code": code, "message": "Already checked in today. Come back tomorrow.",
+                })
+                self.session.get.side_effect = [
+                    self.response(data={"code": 0, "data": {"leftDays": 3, "traffic": 0}}),
+                    self.response(data={"code": 0, "points": 19}),
+                ]
+                result = checkin.process_account(panel, {"cookie": self.cookie})
+                self.assertTrue(result.success)
+                self.assertEqual(result.message, "今日已签到")
+                self.assertEqual(result.left_days, "3")
+                self.assertEqual(result.points, "19")
+                self.session.post.assert_called_once()
+                self.assertEqual(self.session.get.call_count, 2)
+                self.session.close.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_railgun_already_checked_in_does_not_hide_errors(self):
+        panel = next(panel for panel in checkin.PANELS if panel["name"] == "Railgun")
+        message = "Already checked in today. Come back tomorrow."
+        for data in ({"code": 9, "message": message}, {"code": -2, "message": message},
+                     {"code": 1, "message": "Error: " + message}, {"code": 1, "message": [message]}):
+            with self.subTest(data=data):
+                self.session.reset_mock()
+                self.session.post.return_value = self.response(data=data)
+                result = checkin.process_account(panel, {"cookie": self.cookie})
+                self.assertFalse(result.success)
                 self.session.get.assert_not_called()
         self.sleep.assert_not_called()
 

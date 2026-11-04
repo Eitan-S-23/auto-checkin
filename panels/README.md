@@ -191,6 +191,7 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 | `device-mismatch`、`Automated check-in detected` | 核对 Cookie 与 UA 是否来自同一浏览器平台。只读账号查询成功也不保证签到设备校验通过。 |
 | `Checkin Repeats! Please Try Tomorrow` | 重复签到，不应反复重试。 |
 | `Today's observation logged. Return tomorrow for more points.` | 今日已记录，脚本按“今日已签到”展示，不代表每次调用都会增加积分。 |
+| `Already checked in today. Come back tomorrow.` | Railgun 的“今日已签到”响应；与 `code=1` 一起返回时也是正常结果，无需更换 Cookie 或重试。2026-11-04 实测确认登录及积分查询有效，旧版因未识别这条文案而误报失败。 |
 | 剩余天数或积分未获取 | 请求失败会停止后续接口，未取得的值显示“未获取”；只有接口确实返回零积分才显示 `0`。 |
 | Actions 红色，但有账号签到成功 | 任一账号、后续查询或通知失败都会标红；查看安全错误分类和通知中的各账号结果，不代表所有账号都失败。 |
 | 通知去了旧企微群 | 检查是否保留 `PUSH_WEBHOOK_URL`，并设置对应站点的 `*_WECOM_WEBHOOK`。 |
