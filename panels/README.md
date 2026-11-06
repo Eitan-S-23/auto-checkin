@@ -192,6 +192,7 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 | `Checkin Repeats! Please Try Tomorrow` | 重复签到，不应反复重试。 |
 | `Today's observation logged. Return tomorrow for more points.` | 今日已记录，脚本按“今日已签到”展示，不代表每次调用都会增加积分。 |
 | `Already checked in today. Come back tomorrow.` | Railgun 的“今日已签到”响应；与 `code=1` 一起返回时也是正常结果，无需更换 Cookie 或重试。2026-11-04 实测确认登录及积分查询有效，旧版因未识别这条文案而误报失败。 |
+| `Checkin! Got 2 Points (Free account - upgrade for more!)` | Railgun 免费账号的成功响应，2026-11-06 的[公开日志](https://github.com/zzzmzz/railgun_checkin/actions/runs/42180464258)已记录 `code=0`。仅 Railgun 且 `code=0` / `"0"` 时接受这个精确后缀，积分取文案中的数值，并标注“免费账号奖励”；旧版要求文案在 `Points` 处结束，会误报失败并停止后续查询。其他后缀、缺失或失败业务码仍失败，认证和设备拒绝检查保持优先。 |
 | 剩余天数或积分未获取 | 请求失败会停止后续接口，未取得的值显示“未获取”；只有接口确实返回零积分才显示 `0`。 |
 | Actions 红色，但有账号签到成功 | 任一账号、后续查询或通知失败都会标红；查看安全错误分类和通知中的各账号结果，不代表所有账号都失败。 |
 | 通知去了旧企微群 | 检查是否保留 `PUSH_WEBHOOK_URL`，并设置对应站点的 `*_WECOM_WEBHOOK`。 |

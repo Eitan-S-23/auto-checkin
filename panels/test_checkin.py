@@ -548,6 +548,58 @@ class AccountClientTestCase(unittest.TestCase):
                 self.session.get.assert_not_called()
         self.sleep.assert_not_called()
 
+    def test_railgun_free_account_reward_continues_status_and_points_without_retry(self):
+        panel = next(panel for panel in checkin.PANELS if panel["name"] == "Railgun")
+        for code in (0, "0"):
+            with self.subTest(code=code):
+                self.session.reset_mock()
+                self.session.post.return_value = self.response(data={
+                    "code": code, "message": "Checkin! Got 2 Points (Free account - upgrade for more!)",
+                })
+                self.session.get.side_effect = [
+                    self.response(data={"code": 0, "data": {"leftDays": 0, "traffic": 0}}),
+                    self.response(data={"code": 0, "points": 19}),
+                ]
+                result = checkin.process_account(panel, {"cookie": self.cookie})
+                self.assertTrue(result.success)
+                self.assertEqual(result.message, "签到成功，获得2积分（免费账号奖励）")
+                self.assertEqual(result.left_days, "0")
+                self.assertEqual(result.points, "19")
+                self.session.post.assert_called_once()
+                self.assertEqual(self.session.get.call_count, 2)
+                self.session.close.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_railgun_free_account_reward_does_not_hide_errors_or_unknown_suffixes(self):
+        panel = next(panel for panel in checkin.PANELS if panel["name"] == "Railgun")
+        message = "Checkin! Got 2 Points (Free account - upgrade for more!)"
+        cases = [{"code": code, "message": message} for code in (None, False, True, 1, "1", 9, -2)] + [
+            {"code": 0, "message": "Error: " + message},
+            {"code": 0, "message": message + " " + self.cookie},
+            {"code": 0, "message": "Checkin! Got 2 Points (Unknown account notice)"},
+            {"code": 0, "message": message, "reason": "device-mismatch"},
+            {"code": 0, "message": [message]},
+        ]
+        for data in cases:
+            with self.subTest(data=data):
+                self.session.reset_mock()
+                self.session.post.return_value = self.response(data=data)
+                result = checkin.process_account(panel, {"cookie": self.cookie})
+                self.assertFalse(result.success)
+                self.assertNotIn("private-session", result.message)
+                self.session.post.assert_called_once()
+                self.session.get.assert_not_called()
+        self.sleep.assert_not_called()
+
+    def test_railgun_free_account_suffix_is_not_accepted_for_glados(self):
+        self.session.post.return_value = self.response(data={
+            "code": 0, "message": "Checkin! Got 2 Points (Free account - upgrade for more!)",
+        })
+        result = checkin.process_account(self.panel, {"cookie": self.cookie})
+        self.assertFalse(result.success)
+        self.session.get.assert_not_called()
+        self.sleep.assert_not_called()
+
     def test_railgun_already_checked_in_continues_status_and_points_without_retry(self):
         panel = next(panel for panel in checkin.PANELS if panel["name"] == "Railgun")
         for code in (None, 0, "0", 1, "1"):

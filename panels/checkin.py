@@ -460,12 +460,16 @@ def sign(panel, cookie, client=None):
     try:
         data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, client=client)
         msg = data.get("message", "")
+        code = data.get("code")
         normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?[.!]?", msg.strip(), re.I)
+        free_account = panel.get("name") == "Railgun" and isinstance(msg, str) and re.fullmatch(
+            r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?\s+\(Free account - upgrade for more!\)", msg.strip(), re.I,
+        )
         repeated = isinstance(msg, str) and msg in RECORDED_CHECKIN_MESSAGES
-        if not ((data.get("code") in (None, 0, "0") and normal) or
-                (data.get("code") in (None, 0, "0", 1, "1") and repeated)):
+        if not ((code in (None, 0, "0") and normal) or (not isinstance(code, bool) and code in (0, "0") and free_account) or
+                (code in (None, 0, "0", 1, "1") and repeated)):
             raise PanelRequestError("签到接口未返回明确成功或已签到结果，请核对官网", kind="business")
-        return translate_message(msg)
+        return translate_message(msg) + ("（免费账号奖励）" if free_account else "")
     except PanelRequestError as error:
         if client is not None:
             raise
