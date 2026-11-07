@@ -153,7 +153,7 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 | Variable | 默认值 | 有效范围 | 含义 |
 |---|---|---|---|
-| `PANEL_MAX_ATTEMPTS` | `3` | `1` 到 `5` | 单个接口的最大尝试次数，包含首次请求；设为 `1` 关闭重试。 |
+| `PANEL_MAX_ATTEMPTS` | `3` | `1` 到 `5` | 单个接口的最大尝试次数；GLaDOS 签到按 challenge GET + 签到 POST 为一次尝试，设为 `1` 关闭重试。 |
 | `PANEL_RETRY_DELAY_SECONDS` | `10` | `0` 到 `60` | 初始等待秒数，后续按指数退避，单次等待最多 60 秒。 |
 
 未配置、非整数或越界时使用默认值。默认最多请求 3 次，重试前分别等待 10 秒和 20 秒。
@@ -165,6 +165,16 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 - 重试使用同一账号 Session、UA 和域名，不随机切换身份。有效响应下发的 Cookie 更新仅用于本次运行，不更新 Secret，也不自动重新登录。
 
 这里是请求层重试，不是把整个账号签到流程重复执行。认证、设备拒绝、其他不可重试失败或重试耗尽后，停止该账号后续接口请求，继续处理下一个账号。成功签到后的查询失败仍会保留签到成功信息，但整体任务返回失败。
+
+### GLaDOS 一次性 challenge
+
+GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.com/lankerr/2026-glados-checkin/pull/31) 和 [PR #33](https://github.com/lankerr/2026-glados-checkin/pull/33)：同一账号 Session 先 GET `/api/user/checkin/challenge`，读取 `nonce` 和 `ttl`，按 `SHA256(nonce + ".glados-observe-v1")` 计算 proof，等待 2.7 秒，再向同一域名 POST `token`、`nonce`、`proof`。原有账号、UA 和 Secrets 配置无需改变。Railgun 不启用这一步，保留原协议。
+
+`ttl` 单位为毫秒，仅缺失时使用 300000；必须是有限数值且大于 2700。nonce 必须是非空字符串且不超过 4096 字符，按原值 UTF-8 编码，不解码或改写。使用单调时钟核对有效期，并保守计入获取挑战的请求耗时；过期的挑战不会提交。
+
+每次可重试失败或等待中挑战过期时，重新获取 nonce、重新计算 proof 和等待；不直接重放旧 POST，也不叠加挑战 GET 的内部重试。认证、设备拒绝、未知业务响应及无效挑战仍停止账号处理。挑战失败不降级为仅提交 token 的签到，避免静默进入可能只有 1 分的旧路径；日志不输出 nonce/proof。
+
+正常结果仍继续查询账号和积分，并按服务端实际奖励展示。接入 challenge 不保证固定奖励，当天已入账的 1 分不会因重复签到补差。`--diagnose` 仍只查询登录状态，完全不获取 challenge、不签到、不推送。回归见 `test_challenge.py`，覆盖等待、TTL、fresh nonce、同域同 Session、Cookie 更新、失败停止和 Railgun/只读诊断隔离。
 
 ## 6. Cookie 形式变化与当前程序边界
 

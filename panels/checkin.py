@@ -6,6 +6,7 @@
 """
 import argparse
 import datetime
+import hashlib
 import http.cookiejar
 import json
 import math
@@ -56,6 +57,7 @@ PANELS = [
         "accounts_env": "GLADOS_ACCOUNTS_JSON",
         "ua_env": "GLADOS_USER_AGENT",
         "notify_scope": "GLADOS",
+        "checkin_challenge": True,
     },
     {
         "name": "Railgun",
@@ -164,6 +166,9 @@ RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 # curl transport errors only; certificate, authentication and configuration errors are excluded.
 RETRYABLE_CURL_CODES = {5, 6, 7, 16, 18, 28, 52, 55, 56, 92}
 MAX_RETRY_WAIT_SECONDS = 60
+CHECKIN_CHALLENGE_DELAY_SECONDS = 2.7
+CHECKIN_CHALLENGE_SUFFIX = ".glados-observe-v1"
+CHECKIN_CHALLENGE_DEFAULT_TTL_MS = 300000
 
 
 class PanelRequestError(RuntimeError):
@@ -388,14 +393,16 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
         raise PanelRequestError(f"请求异常（{type(error).__name__}）", retryable=retryable, kind="transport") from None
 
 
-def request_json(panel, cookie, path, method="GET", payload=None, client=None):
+def request_json(panel, cookie, path, method="GET", payload=None, client=None, *, payload_factory=None):
+    """Build per-attempt payloads inside the retry loop, on the same account Session."""
     if client is None:
         with AccountClient(panel, cookie) as owned:
-            return request_json(panel, cookie, path, method, payload, owned)
+            return request_json(panel, cookie, path, method, payload, owned, payload_factory=payload_factory)
     attempts, base_delay = retry_settings()
     for attempt in range(1, attempts + 1):
         try:
-            return request_json_once(panel, cookie, path, method, payload, client)
+            attempt_payload = payload_factory(client) if payload_factory is not None else payload
+            return request_json_once(panel, cookie, path, method, attempt_payload, client)
         except PanelRequestError as error:
             if not error.retryable:
                 raise
@@ -456,9 +463,37 @@ def fetch_points(panel, cookie, client=None):
         return "获取失败"
 
 
+def prepare_checkin_payload(panel, cookie, client):
+    started_at = time.monotonic()
+    challenge = request_json_once(panel, cookie, "/api/user/checkin/challenge", "GET", None, client)
+    code = challenge.get("code")
+    if type(code) not in (int, str) or code not in (0, "0"):
+        raise PanelRequestError("签到挑战接口业务失败，未提交签到", kind="challenge")
+    nonce = challenge.get("nonce")
+    ttl = challenge.get("ttl", CHECKIN_CHALLENGE_DEFAULT_TTL_MS)
+    if not isinstance(nonce, str) or not nonce.strip() or len(nonce) > 4096:
+        raise PanelRequestError("签到挑战 nonce 缺失或格式异常，未提交签到", kind="challenge")
+    if (type(ttl) not in (int, float) or (type(ttl) is float and not math.isfinite(ttl)) or
+            ttl <= CHECKIN_CHALLENGE_DELAY_SECONDS * 1000):
+        raise PanelRequestError("签到挑战 TTL 无效或不足，未提交签到", kind="challenge")
+    try:
+        proof = hashlib.sha256((nonce + CHECKIN_CHALLENGE_SUFFIX).encode("utf-8")).hexdigest()
+    except UnicodeError:
+        raise PanelRequestError("签到挑战 nonce 编码无效，未提交签到", kind="challenge") from None
+    if (time.monotonic() - started_at + CHECKIN_CHALLENGE_DELAY_SECONDS) * 1000 >= ttl:
+        raise PanelRequestError("签到挑战已过期或剩余时间不足，未提交签到", retryable=True, kind="challenge")
+    time.sleep(CHECKIN_CHALLENGE_DELAY_SECONDS)
+    if (time.monotonic() - started_at) * 1000 >= ttl:
+        raise PanelRequestError("签到挑战已过期，未提交签到", retryable=True, kind="challenge")
+    return {"token": panel["token"], "nonce": nonce, "proof": proof}
+
+
 def sign(panel, cookie, client=None):
     try:
-        data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, client=client)
+        kwargs = {"client": client}
+        if panel.get("checkin_challenge"):
+            kwargs["payload_factory"] = lambda active: prepare_checkin_payload(panel, cookie, active)
+        data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, **kwargs)
         msg = data.get("message", "")
         code = data.get("code")
         normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?[.!]?", msg.strip(), re.I)

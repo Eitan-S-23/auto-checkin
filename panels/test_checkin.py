@@ -101,8 +101,11 @@ class CookieHeaderCompatibilityTestCase(unittest.TestCase):
     def test_sign_sends_current_cookie_and_matching_panel_token(self):
         cookie = "gld:sess=opaque-session; gld:sess.sig=opaque-signature"
         for panel in checkin.PANELS:
-            with self.subTest(panel=panel["name"]), mock.patch("checkin.create_retry_session") as create:
+            with self.subTest(panel=panel["name"]), mock.patch("checkin.create_retry_session") as create, \
+                    mock.patch("checkin.time.sleep") as sleep:
                 session = create.return_value
+                session.get.return_value.status_code = 200
+                session.get.return_value.json.return_value = {"code": 0, "nonce": "test-nonce", "ttl": 300000}
                 session.post.return_value.status_code = 200
                 session.post.return_value.json.return_value = {"message": "Checkin! Got 3 Points"}
                 self.assertIn("3", checkin.sign(panel, cookie))
@@ -110,7 +113,16 @@ class CookieHeaderCompatibilityTestCase(unittest.TestCase):
                 args, kwargs = session.post.call_args
                 self.assertEqual(args, (panel["origin"] + "/api/user/checkin",))
                 self.assertEqual(kwargs["headers"]["Cookie"], cookie)
-                self.assertEqual(kwargs["json"], {"token": panel["token"]})
+                self.assertEqual(kwargs["json"]["token"], panel["token"])
+                if panel.get("checkin_challenge"):
+                    self.assertEqual(kwargs["json"]["nonce"], "test-nonce")
+                    self.assertEqual(len(kwargs["json"]["proof"]), 64)
+                    session.get.assert_called_once()
+                    sleep.assert_called_once_with(2.7)
+                else:
+                    self.assertEqual(kwargs["json"], {"token": panel["token"]})
+                    session.get.assert_not_called()
+                    sleep.assert_not_called()
 
 
 class RequestRetryTestCase(unittest.TestCase):
@@ -127,7 +139,8 @@ class RequestRetryTestCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
         _, self.create, self.sleep, self.print = handles
         self.session = self.create.return_value
-        self.panel = checkin.PANELS[0]
+        # Generic transport/session tests use the legacy protocol; actual GLaDOS is covered in test_challenge.py.
+        self.panel = dict(checkin.PANELS[0], checkin_challenge=False)
         self.cookie = "gld:sess=private-session; gld:sess.sig=private-signature"
 
     def response(self, status=200, data=None, headers=None):
