@@ -14,7 +14,8 @@ class CheckinChallengeTestCase(unittest.TestCase):
 
     def setUp(self):
         test_checkin.RequestRetryTestCase.setUp(self)
-        self.panel = checkin.PANELS[0]
+        # Isolate challenge retries; production multi-origin behavior is covered in test_domains.py.
+        self.panel = dict(checkin.PANELS[0], fallback_origins=())
         patcher = mock.patch("checkin.time.monotonic", return_value=100.0)
         self.monotonic = patcher.start()
         self.addCleanup(patcher.stop)

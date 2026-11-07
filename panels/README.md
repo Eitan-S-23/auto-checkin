@@ -8,7 +8,7 @@
 
 | 站点 | 当前接口域名 | Secrets：账号配置 | Variables：浏览器 UA（可选） |
 |---|---|---|---|
-| GLaDOS | `https://glados.cloud` | `GLADOS_ACCOUNTS_JSON` | `GLADOS_USER_AGENT` |
+| GLaDOS | `https://glados.cloud`（支持备用域名，见下文） | `GLADOS_ACCOUNTS_JSON` | `GLADOS_USER_AGENT` |
 | Railgun | `https://railgun.info` | `RAILGUN_ACCOUNTS_JSON` | `RAILGUN_USER_AGENT` |
 
 - 账号配置和推送密钥放在 **Secrets → New repository secret**，不要放进公开 Variables、代码或 Issue。
@@ -153,18 +153,29 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 | Variable | 默认值 | 有效范围 | 含义 |
 |---|---|---|---|
-| `PANEL_MAX_ATTEMPTS` | `3` | `1` 到 `5` | 单个接口的最大尝试次数；GLaDOS 签到按 challenge GET + 签到 POST 为一次尝试，设为 `1` 关闭重试。 |
+| `PANEL_MAX_ATTEMPTS` | `3` | `1` 到 `5` | 单个接口的最大尝试轮数；GLaDOS 每轮最多访问三个候选域名，每次签到均重新获取 challenge。设为 `1` 关闭轮间重试，仍可切换备用域名。 |
 | `PANEL_RETRY_DELAY_SECONDS` | `10` | `0` 到 `60` | 初始等待秒数，后续按指数退避，单次等待最多 60 秒。 |
 
-未配置、非整数或越界时使用默认值。默认最多请求 3 次，重试前分别等待 10 秒和 20 秒。
+未配置、非整数或越界时使用默认值。默认最多尝试 3 轮，轮间分别等待 10 秒和 20 秒。Railgun 每轮仅请求一次；GLaDOS 每轮在允许切换时依次尝试候选域名，单个接口最多 9 次尝试（签到每次包含 challenge GET，获得有效 challenge 后才 POST）。
 
 - 仅重试超时、部分连接/传输错误，以及 HTTP `408`、`429`、`500`、`502`、`503`、`504`。
 - HTTP `401` / `403`、`code=-2`、设备校验拒绝、配置错误、证书校验错误和未知业务响应不重试。重复签到、今日已记录也不会额外重试。
 - `Retry-After` 支持秒数和 HTTP 日期，不会早于服务端要求重试；若要求等待超过 60 秒，停止本次重试，避免长时间阻塞。
 - 签到 POST 超时可能是“服务端已处理但响应未收到”，重试可能返回重复签到。耗尽重试时状态仍未知，应核对官网记录，不把它判断为当天一定未签。
-- 重试使用同一账号 Session、UA 和域名，不随机切换身份。有效响应下发的 Cookie 更新仅用于本次运行，不更新 Secret，也不自动重新登录。
+- 重试使用同一账号 Session 和 UA；GLaDOS 仅按下述规则切换候选域名。有效响应下发的 Cookie 更新按域名隔离，仅用于本次运行，不更新 Secret，也不自动重新登录。
 
 这里是请求层重试，不是把整个账号签到流程重复执行。认证、设备拒绝、其他不可重试失败或重试耗尽后，停止该账号后续接口请求，继续处理下一个账号。成功签到后的查询失败仍会保留签到成功信息，但整体任务返回失败。
+
+### GLaDOS 备用域名
+
+参考 [lankerr/2026-glados-checkin 的域名列表和请求逻辑](https://github.com/lankerr/2026-glados-checkin/blob/8649193124403fb0195c66a6e4be8b7d2103b96b/checkin.py#L35)，默认按 `glados.cloud`、`glados.rocks`、`glados.network` 的顺序尝试。每个账号从主域名开始，切换成功后，后续状态和积分查询优先使用该域名；不会改变其他账号或 Railgun 的配置。
+
+- DNS、连接/传输临时错误、超时，以及 HTTP `408` / `500` / `502` / `503` / `504` 可切换备用域名。HTTP `301` / `302` / `303` / `307` / `308` / `404` / `410` 和 GET 返回非 JSON / 非对象时也可切换；不跟随响应的 `Location`，只访问代码中列出的候选域名。
+- HTTP `429` 不切换；有效 `Retry-After` 优先按原规则等待或停止，不通过切换绕过等待。认证、设备拒绝、会话被清除、证书错误、未知业务响应及无效 challenge 不触发切换。POST 返回格式异常时停止，避免把状态未知的响应当作域名失效。
+- 切换后重新获取该域名的 challenge、重新计算 proof 并等待，POST 的地址、`Origin`、`Referer` 和 `token` 均绑定到发放 nonce 的域名；不会把旧 nonce/proof 重放到备用域名。普通静态 POST 不跨域重放，challenge 失败也不会降级旧协议。
+- 每轮每个候选域名最多尝试一次。只读诊断也支持切换，但仍只查询状态；成功签到后的查询切换不会重新签到。各域名以账号配置的原始 Cookie 初始化，服务端更新的 Cookie 只在该域名复用，不复制到其他域名。是否能跨域登录仍由服务端决定。
+
+切换日志仅记录候选域名、接口路径和固定错误分类，不输出 Cookie、nonce 或 proof。回归测试见 `test_domains.py`。
 
 ### GLaDOS 一次性 challenge
 

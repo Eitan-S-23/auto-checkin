@@ -53,6 +53,7 @@ PANELS = [
     {
         "name": "GLaDOS",
         "origin": "https://glados.cloud",
+        "fallback_origins": ("https://glados.rocks", "https://glados.network"),
         "token": "glados.cloud",
         "accounts_env": "GLADOS_ACCOUNTS_JSON",
         "ua_env": "GLADOS_USER_AGENT",
@@ -163,6 +164,7 @@ def create_retry_session(impersonate="chrome124"):
 
 
 RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+FALLBACK_HTTP_STATUS = {301, 302, 303, 307, 308, 404, 408, 410, 500, 502, 503, 504}
 # curl transport errors only; certificate, authentication and configuration errors are excluded.
 RETRYABLE_CURL_CODES = {5, 6, 7, 16, 18, 28, 52, 55, 56, 92}
 MAX_RETRY_WAIT_SECONDS = 60
@@ -172,11 +174,12 @@ CHECKIN_CHALLENGE_DEFAULT_TTL_MS = 300000
 
 
 class PanelRequestError(RuntimeError):
-    def __init__(self, message, retryable=False, retry_after=None, kind="request"):
+    def __init__(self, message, retryable=False, retry_after=None, kind="request", fallback_allowed=False):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
         self.kind = kind
+        self.fallback_allowed = fallback_allowed
 
 
 def cookie_pairs(raw):
@@ -248,22 +251,40 @@ class AccountCookieJar(http.cookiejar.CookieJar):
 
 class AccountClient:
     def __init__(self, panel, cookie, user_agent=None, impersonate=None):
-        self.panel = panel
+        self.panel = dict(panel)
+        self.origins = tuple(dict.fromkeys((panel["origin"], *panel.get("fallback_origins", ()))))
         self.user_agent = user_agent or (os.getenv(panel.get("ua_env", ""), "").strip() if panel.get("ua_env") else "") or DEFAULT_USER_AGENT
         sanitize_header_value(self.user_agent)
-        pairs = cookie_pairs(cookie)
+        self.initial_cookies = cookie_pairs(cookie)
         self.profile, self.profile_exact = browser_profile(self.user_agent, impersonate)
-        self.jar = AccountCookieJar()
-        self.required_sessions = {name for name in pairs if name.endswith(":sess")}
-        host = urlparse(panel["origin"]).hostname
-        for name, value in pairs.items():
-            self.jar.set_cookie(http.cookiejar.Cookie(0, name, value, None, False, host, False, False,
-                "/", True, panel["origin"].startswith("https://"), None, True, None, None, {}, False))
+        self.jars = {}
+        self.required_sessions = {name for name in self.initial_cookies if name.endswith(":sess")}
+        self.jar = self.jar_for_origin(panel["origin"])
         self.cookie_updated = False
         try:
             self.session = create_retry_session(self.profile)
         except Exception as error:
             raise PanelRequestError(f"Session 初始化失败（{type(error).__name__}）", kind="config") from None
+
+    def jar_for_origin(self, origin):
+        if origin not in self.jars:
+            jar = AccountCookieJar()
+            host = urlparse(origin).hostname
+            # Seed approved origins with the configured Cookie; never copy another origin's updates.
+            for name, value in self.initial_cookies.items():
+                jar.set_cookie(http.cookiejar.Cookie(0, name, value, None, False, host, False, False,
+                    "/", True, origin.startswith("https://"), None, True, None, None, {}, False))
+            self.jars[origin] = jar
+        return self.jars[origin]
+
+    def switch_origin(self, tried):
+        for origin in self.origins:
+            if origin not in tried:
+                self.panel["origin"] = origin
+                self.panel["token"] = urlparse(origin).hostname
+                self.jar = self.jar_for_origin(origin)
+                return True
+        return False
 
     def __enter__(self):
         return self
@@ -353,6 +374,7 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
     if client is None:
         with AccountClient(panel, cookie) as owned:
             return request_json_once(panel, cookie, path, method, payload, owned)
+    panel = client.panel
     try:
         kwargs = {"headers": client.headers(path), "timeout": 15, "allow_redirects": False,
                   "discard_cookies": True, "default_headers": False}
@@ -366,15 +388,18 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
             raise PanelRequestError(
                 f"HTTP {status}", retryable=True,
                 retry_after=retry_after_seconds(response.headers.get("Retry-After")), kind="http",
+                fallback_allowed=status in FALLBACK_HTTP_STATUS,
             )
+        if status in FALLBACK_HTTP_STATUS:
+            raise PanelRequestError(f"HTTP {status}，当前接口不可用", kind="http", fallback_allowed=True)
         if not 200 <= status < 300:
             raise PanelRequestError(f"HTTP {status}，不重试", kind="http")
         try:
             data = response.json()
         except ValueError:
-            raise PanelRequestError("响应不是有效 JSON，状态未知，不重试", kind="response") from None
+            raise PanelRequestError("响应不是有效 JSON，状态未知", kind="response", fallback_allowed=method == "GET") from None
         if not isinstance(data, dict):
-            raise PanelRequestError("响应 JSON 结构异常，状态未知，不重试", kind="response")
+            raise PanelRequestError("响应 JSON 结构异常，状态未知", kind="response", fallback_allowed=method == "GET")
         message = data.get("message", "")
         message = message.lower() if isinstance(message, str) else ""
         if data.get("reason") == "device-mismatch" or "automated check-in detected" in message:
@@ -390,33 +415,44 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
     except Exception as error:
         retryable = isinstance(error, (TimeoutError, ConnectionError)) or getattr(error, "code", None) in RETRYABLE_CURL_CODES
         # Transport exceptions can contain Cookie values; retain only their type.
-        raise PanelRequestError(f"请求异常（{type(error).__name__}）", retryable=retryable, kind="transport") from None
+        raise PanelRequestError(f"请求异常（{type(error).__name__}）", retryable=retryable,
+                                kind="transport", fallback_allowed=retryable) from None
 
 
 def request_json(panel, cookie, path, method="GET", payload=None, client=None, *, payload_factory=None):
-    """Build per-attempt payloads inside the retry loop, on the same account Session."""
+    """Try approved origins per round; rebuild one-time payloads after every switch."""
     if client is None:
         with AccountClient(panel, cookie) as owned:
             return request_json(panel, cookie, path, method, payload, owned, payload_factory=payload_factory)
     attempts, base_delay = retry_settings()
     for attempt in range(1, attempts + 1):
-        try:
-            attempt_payload = payload_factory(client) if payload_factory is not None else payload
-            return request_json_once(panel, cookie, path, method, attempt_payload, client)
-        except PanelRequestError as error:
-            if not error.retryable:
-                raise
-            if attempt == attempts:
-                raise PanelRequestError(f"{error}，已尝试 {attempt} 次，状态未知", kind=error.kind) from None
-            delay = min(base_delay * 2 ** (attempt - 1), MAX_RETRY_WAIT_SECONDS)
-            if error.retry_after is not None:
-                if error.retry_after > MAX_RETRY_WAIT_SECONDS:
-                    raise PanelRequestError(
-                        f"{error}，服务端要求等待超过 {MAX_RETRY_WAIT_SECONDS} 秒，停止本次重试", kind=error.kind,
-                    ) from None
-                delay = max(delay, error.retry_after)
-            print(f"[{panel['name']}] {path} {error}，{delay:g} 秒后重试（{attempt + 1}/{attempts}）")
-            time.sleep(delay)
+        tried = set()
+        while True:
+            origin = client.panel["origin"]
+            tried.add(origin)
+            try:
+                attempt_payload = payload_factory(client) if payload_factory is not None else payload
+                return request_json_once(panel, cookie, path, method, attempt_payload, client)
+            except PanelRequestError as error:
+                # Static POST payloads must never be replayed on another origin.
+                if (error.fallback_allowed and error.retry_after is None and
+                        (method == "GET" or payload_factory is not None) and client.switch_origin(tried)):
+                    print(f"[{panel['name']}] {origin} {path} {error}，切换备用域名 {client.panel['origin']}")
+                    continue
+                if not error.retryable:
+                    raise
+                if attempt == attempts:
+                    raise PanelRequestError(f"{error}，已尝试 {attempt} 轮，状态未知", kind=error.kind) from None
+                delay = min(base_delay * 2 ** (attempt - 1), MAX_RETRY_WAIT_SECONDS)
+                if error.retry_after is not None:
+                    if error.retry_after > MAX_RETRY_WAIT_SECONDS:
+                        raise PanelRequestError(
+                            f"{error}，服务端要求等待超过 {MAX_RETRY_WAIT_SECONDS} 秒，停止本次重试", kind=error.kind,
+                        ) from None
+                    delay = max(delay, error.retry_after)
+                print(f"[{panel['name']}] {path} {error}，{delay:g} 秒后重试（{attempt + 1}/{attempts}）")
+                time.sleep(delay)
+                break
 
 
 def check_account_status(panel, cookie, client=None):
@@ -464,6 +500,7 @@ def fetch_points(panel, cookie, client=None):
 
 
 def prepare_checkin_payload(panel, cookie, client):
+    panel = client.panel
     started_at = time.monotonic()
     challenge = request_json_once(panel, cookie, "/api/user/checkin/challenge", "GET", None, client)
     code = challenge.get("code")

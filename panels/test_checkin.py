@@ -139,8 +139,8 @@ class RequestRetryTestCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
         _, self.create, self.sleep, self.print = handles
         self.session = self.create.return_value
-        # Generic transport/session tests use the legacy protocol; actual GLaDOS is covered in test_challenge.py.
-        self.panel = dict(checkin.PANELS[0], checkin_challenge=False)
+        # Single-origin transport tests; production GLaDOS is covered in the challenge/domain suites.
+        self.panel = dict(checkin.PANELS[0], checkin_challenge=False, fallback_origins=())
         self.cookie = "gld:sess=private-session; gld:sess.sig=private-signature"
 
     def response(self, status=200, data=None, headers=None):
