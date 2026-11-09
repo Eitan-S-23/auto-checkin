@@ -13,7 +13,8 @@ on:
 
 jobs:
   run-nodeseek-daily:
-    runs-on: ubuntu-latest
+    # Pin the runner: Ubuntu 26.04 has no Python 3.11.8 build.
+    runs-on: ubuntu-24.04
     # 设定时区为北京时间，使脚本内 time.localtime/strftime 输出 UTC+8，
     # 通知里的"执行时间"不再显示 UTC，与签到自然日对齐。
     # 通知与站间延迟变量放在 job 级：NodeSeek 与 LinuxSB 两个步骤共用，
