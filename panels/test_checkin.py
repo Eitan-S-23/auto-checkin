@@ -128,7 +128,9 @@ class CookieHeaderCompatibilityTestCase(unittest.TestCase):
 class RequestRetryTestCase(unittest.TestCase):
     def setUp(self):
         patchers = [
-            mock.patch.dict("os.environ", {"PANEL_MAX_ATTEMPTS": "3", "PANEL_RETRY_DELAY_SECONDS": "10"}),
+            mock.patch.dict("os.environ", {"PANEL_MAX_ATTEMPTS": "3", "PANEL_RETRY_DELAY_SECONDS": "10",
+                                           "GLADOS_PROXY_URL": "", "GLADOS_LOW_REWARD_THRESHOLD": "2",
+                                           "GLADOS_USER_AGENT": "", "RAILGUN_USER_AGENT": ""}),
             mock.patch("checkin.create_retry_session"),
             mock.patch("checkin.time.sleep"),
             mock.patch("builtins.print"),

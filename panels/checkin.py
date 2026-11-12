@@ -59,6 +59,7 @@ PANELS = [
         "ua_env": "GLADOS_USER_AGENT",
         "notify_scope": "GLADOS",
         "checkin_challenge": True,
+        "proxy_env": "GLADOS_PROXY_URL",
     },
     {
         "name": "Railgun",
@@ -114,18 +115,77 @@ def sanitize_header_value(value):
     return value
 
 
+def normalize_user_agent(raw):
+    value = sanitize_header_value(raw).strip()
+    if not value:
+        return ""
+    prefix_removed = quoted = False
+    for _ in range(3):
+        if re.match(r"^user-agent\s*:", value, re.I):
+            if prefix_removed:
+                raise PanelRequestError("User-Agent 请求头名称重复，请只保留值", kind="config")
+            value = re.sub(r"^user-agent\s*:\s*", "", value, count=1, flags=re.I).strip()
+            prefix_removed = True
+            continue
+        double_quote = value.startswith('"') or value.endswith('"')
+        # Preserve legal single-quoted product tokens; unwrap full browser strings only.
+        single_quote = (len(value) >= 2 and value[0] == value[-1] == "'" and
+                        (not value[1:-1] or " " in value[1:-1] or
+                         re.match(r"^user-agent\s*:", value[1:-1], re.I)))
+        if double_quote or single_quote:
+            if quoted or len(value) < 2 or value[0] != value[-1]:
+                raise PanelRequestError("User-Agent 外层引号无效，请只保留值", kind="config")
+            value = value[1:-1].strip()
+            quoted = True
+            continue
+        break
+    if not value or re.match(r"^user-agent\s*:", value, re.I) or value.startswith('"') or value.endswith('"'):
+        raise PanelRequestError("User-Agent 值为空或包含重复包装，请重新复制", kind="config")
+    return value
+
+
+def resolve_user_agent(panel, account_value=None):
+    candidates = (("account", account_value),
+                  ("panel", os.getenv(panel["ua_env"], "") if panel.get("ua_env") else ""))
+    for source, raw in candidates:
+        if raw is not None:
+            value = normalize_user_agent(raw)
+            if value:
+                return value, source, value != raw.strip()
+    return DEFAULT_USER_AGENT, "default", False
+
+
+def configured_proxy(panel):
+    raw = os.getenv(panel["proxy_env"], "") if panel.get("proxy_env") else ""
+    value = sanitize_header_value(raw).strip()
+    if not value:
+        return None
+    try:
+        parsed = urlparse(value)
+        valid = (parsed.scheme in ("http", "https", "socks5", "socks5h") and parsed.hostname and not re.search(r"\s", value) and
+                 (parsed.port is None or 1 <= parsed.port <= 65535) and
+                 parsed.path in ("", "/") and not parsed.query and not parsed.fragment)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise PanelRequestError("代理 URL 格式无效，请检查站点代理配置", kind="config")
+    return value
+
+
 def generate_headers(cookie, panel, user_agent=None):
-    ua_env = panel.get("ua_env")
-    if user_agent is None:
-        user_agent = (os.getenv(ua_env, "") if ua_env else "").strip() or DEFAULT_USER_AGENT
+    user_agent, _, _ = resolve_user_agent(panel, user_agent)
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Content-Type": "application/json;charset=UTF-8",
         "Cookie": cookie,
         "Origin": panel["origin"],
         "Referer": panel["origin"] + "/console/checkin",
         "User-Agent": user_agent,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     }
     chrome = re.search(r"(?:Chrome|Chromium)/(\d+)", user_agent)
     if chrome:
@@ -159,8 +219,8 @@ def bytes_to_gb(traffic_bytes):
     return f"{gb:.3f}"
 
 
-def create_retry_session(impersonate="chrome124"):
-    return cffi_requests.Session(impersonate=impersonate)
+def create_retry_session(impersonate="chrome124", *, trust_env=True):
+    return cffi_requests.Session(impersonate=impersonate, trust_env=trust_env)
 
 
 RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
@@ -253,8 +313,9 @@ class AccountClient:
     def __init__(self, panel, cookie, user_agent=None, impersonate=None):
         self.panel = dict(panel)
         self.origins = tuple(dict.fromkeys((panel["origin"], *panel.get("fallback_origins", ()))))
-        self.user_agent = user_agent or (os.getenv(panel.get("ua_env", ""), "").strip() if panel.get("ua_env") else "") or DEFAULT_USER_AGENT
-        sanitize_header_value(self.user_agent)
+        self.user_agent, self.ua_source, self.ua_normalized = resolve_user_agent(panel, user_agent)
+        self.proxy_url = configured_proxy(panel)
+        self.checkin_outcome = None
         self.initial_cookies = cookie_pairs(cookie)
         self.profile, self.profile_exact = browser_profile(self.user_agent, impersonate)
         self.jars = {}
@@ -262,7 +323,11 @@ class AccountClient:
         self.jar = self.jar_for_origin(panel["origin"])
         self.cookie_updated = False
         try:
-            self.session = create_retry_session(self.profile)
+            if self.proxy_url:
+                # NO_PROXY must not bypass a proxy selected explicitly for this panel.
+                self.session = create_retry_session(self.profile, trust_env=False)
+            else:
+                self.session = create_retry_session(self.profile)
         except Exception as error:
             raise PanelRequestError(f"Session 初始化失败（{type(error).__name__}）", kind="config") from None
 
@@ -322,6 +387,15 @@ class AccountClient:
 
 
 @dataclass(frozen=True)
+class CheckinOutcome:
+    category: str
+    reward: str | None
+    code: str
+    reason: str
+    origin: str
+
+
+@dataclass(frozen=True)
 class AccountResult:
     success: bool
     message: str
@@ -329,6 +403,7 @@ class AccountResult:
     traffic: str = "未获取"
     points: str = "未获取"
     cookie_updated: bool = False
+    checkin_outcome: CheckinOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +453,8 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
     try:
         kwargs = {"headers": client.headers(path), "timeout": 15, "allow_redirects": False,
                   "discard_cookies": True, "default_headers": False}
+        if client.proxy_url is not None:
+            kwargs["proxy"] = client.proxy_url
         if method == "POST":
             kwargs["json"] = payload
         response = getattr(client.session, method.lower())(panel["origin"] + path, **kwargs)
@@ -525,22 +602,65 @@ def prepare_checkin_payload(panel, cookie, client):
     return {"token": panel["token"], "nonce": nonce, "proof": proof}
 
 
+def safe_business_code(value):
+    if value is None:
+        return "missing"
+    if type(value) is int and -999 <= value <= 999:
+        return str(value)
+    if isinstance(value, str) and re.fullmatch(r"-?\d{1,3}", value):
+        return str(int(value))
+    return "invalid"
+
+
+def safe_checkin_reason(value):
+    if value is None or value == "":
+        return "missing"
+    allowed = {"device-mismatch", "observation", "observation-period", "already-checked-in", "low-reward"}
+    return value if isinstance(value, str) and value in allowed else "other"
+
+
+def low_reward_warning(panel, outcome):
+    if panel.get("name") != "GLaDOS" or outcome is None or outcome.category != "reward":
+        return ""
+    try:
+        threshold = int(os.getenv("GLADOS_LOW_REWARD_THRESHOLD", "").strip() or "2")
+    except ValueError:
+        threshold = 2
+    if not 0 <= threshold <= 100:
+        threshold = 2
+    if threshold and float(outcome.reward) <= threshold:
+        return f"低奖励提醒：本次获得{outcome.reward}积分；签到已成功，不自动补签，原因尚未确认"
+    return ""
+
+
 def sign(panel, cookie, client=None):
     try:
+        if client is not None:
+            client.checkin_outcome = None
         kwargs = {"client": client}
         if panel.get("checkin_challenge"):
             kwargs["payload_factory"] = lambda active: prepare_checkin_payload(panel, cookie, active)
         data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, **kwargs)
         msg = data.get("message", "")
         code = data.get("code")
-        normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?[.!]?", msg.strip(), re.I)
+        normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?[.!]?", msg.strip(), re.I)
         free_account = panel.get("name") == "Railgun" and isinstance(msg, str) and re.fullmatch(
-            r"Checkin!\s*Got\s+\d+(?:\.\d+)?\s+Points?\s+\(Free account - upgrade for more!\)", msg.strip(), re.I,
+            r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?\s+\(Free account - upgrade for more!\)", msg.strip(), re.I,
         )
         repeated = isinstance(msg, str) and msg in RECORDED_CHECKIN_MESSAGES
-        if not ((code in (None, 0, "0") and normal) or (not isinstance(code, bool) and code in (0, "0") and free_account) or
+        if isinstance(code, bool) or not ((code in (None, 0, "0") and normal) or (code in (0, "0") and free_account) or
                 (code in (None, 0, "0", 1, "1") and repeated)):
-            raise PanelRequestError("签到接口未返回明确成功或已签到结果，请核对官网", kind="business")
+            raise PanelRequestError(
+                "签到接口未返回明确成功或已签到结果，请核对官网 "
+                f"[code={safe_business_code(code)}, reason={safe_checkin_reason(data.get('reason'))}]", kind="business",
+            )
+        category = "free_reward" if free_account else "reward" if normal else (
+            "observation" if msg.startswith("Today's observation logged.") else "repeated")
+        if client is not None:
+            client.checkin_outcome = CheckinOutcome(
+                category, (normal or free_account).group(1) if normal or free_account else None,
+                safe_business_code(code), safe_checkin_reason(data.get("reason")), client.panel["origin"],
+            )
         return translate_message(msg) + ("（免费账号奖励）" if free_account else "")
     except PanelRequestError as error:
         if client is not None:
@@ -564,8 +684,12 @@ def process_account(panel, account, diagnostic=False):
     message, days, traffic, points = "未执行签到", "未获取", "未获取", "未获取"
     client = None
     try:
-        with AccountClient(panel, cookie, account.get("user_agent", "").strip() if account.get("user_agent") else None,
+        with AccountClient(panel, cookie, account.get("user_agent"),
                            account.get("impersonate", "").strip() if account.get("impersonate") else None) as client:
+            source = {"account": "账号", "panel": "面板", "default": "内置默认"}[client.ua_source]
+            network = "显式代理" if client.proxy_url else "默认网络"
+            normalized = "；输入已规范化" if client.ua_normalized else ""
+            print(f"[{panel['name']}] UA 来源={source}；传输预设={client.profile}；网络={network}{normalized}")
             if not client.profile_exact:
                 print(f"[{panel['name']}] UA 无精确对应预设或使用显式预设；保留原 UA，不保证完整浏览器指纹一致")
             if not diagnostic:
@@ -575,14 +699,15 @@ def process_account(panel, account, diagnostic=False):
                 message = "登录状态有效（仅查询，未执行签到）"
             else:
                 points = fetch_points(panel, cookie, client=client)
-        return AccountResult(True, message, days, traffic, points, client.cookie_updated)
+        return AccountResult(True, message, days, traffic, points, client.cookie_updated, client.checkin_outcome)
     except PanelRequestError as error:
         failure = str(error)
     except Exception as error:
         failure = f"账号处理异常（{type(error).__name__}）"
     if message != "未执行签到":
         failure = message + "；后续查询失败：" + failure
-    return AccountResult(False, failure, days, traffic, points, bool(client and client.cookie_updated))
+    return AccountResult(False, failure, days, traffic, points, bool(client and client.cookie_updated),
+                         client.checkin_outcome if client else None)
 
 
 def checkin_panel(panel, diagnostic=False):
@@ -613,8 +738,21 @@ def checkin_panel(panel, diagnostic=False):
         all_success = all_success and result.success
         status = "成功" if result.success else "失败"
         print(f"[{panel['name']}] 账号{idx}: {status}；{result.message}")
+        outcome = result.checkin_outcome
+        if outcome is not None:
+            category = {"reward": "首次奖励", "free_reward": "免费账号奖励", "observation": "今日观察已记录",
+                        "repeated": "重复签到"}[outcome.category]
+            reward = outcome.reward if outcome.reward is not None else "未提供"
+            print(f"[{panel['name']}] 账号{idx}: 分类={category}；奖励={reward}；code={outcome.code}；"
+                  f"reason={outcome.reason}；域名={urlparse(outcome.origin).hostname}")
         msg_list.append(f"📩 账号：{email}")
         msg_list.append(f"{status}：{result.message}")
+        if outcome is not None:
+            msg_list.append(f"结果分类：{category}；本次奖励：{reward}；code={outcome.code}；reason={outcome.reason}")
+        warning = low_reward_warning(panel, outcome)
+        if warning:
+            print(f"[{panel['name']}] 账号{idx}: {warning}")
+            msg_list.append(warning)
         msg_list.append(f"📅 剩余：{result.left_days} 天")
         msg_list.append(f"🎯 积分：{result.points}")
         msg_list.append(f"📶 流量已用：{result.traffic} GB")

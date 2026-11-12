@@ -11,7 +11,7 @@ on:
         default: false
 
 concurrency:
-  group: panels-checkin-${{ github.ref }}
+  group: panels-checkin
   cancel-in-progress: false
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests curl_cffi
+          python -m pip install -r panels/requirements.txt
 
       - name: Run offline regression tests
         run: |
@@ -46,9 +46,13 @@ jobs:
           # 面板账号：变量为空即跳过该面板（面板清单见 panels/checkin.py 的 PANELS）
           GLADOS_ACCOUNTS_JSON: ${{ secrets.GLADOS_ACCOUNTS_JSON }}
           RAILGUN_ACCOUNTS_JSON: ${{ secrets.RAILGUN_ACCOUNTS_JSON }}
-          # 面板级 UA 覆盖（可选 vars）：某站需要与登录设备一致的其他平台 UA 时再配置
-          GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT }}
-          RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT }}
+          # 面板级 UA 覆盖（可选 vars，回退同名 Secret）：需要与登录设备一致的 UA 时再配置
+          GLADOS_USER_AGENT: ${{ vars.GLADOS_USER_AGENT || secrets.GLADOS_USER_AGENT }}
+          RAILGUN_USER_AGENT: ${{ vars.RAILGUN_USER_AGENT || secrets.RAILGUN_USER_AGENT }}
+          # GLaDOS 显式代理入口，可连接现有 WARP 本地代理；为空时保持默认网络，不自动安装 WARP。
+          GLADOS_PROXY_URL: ${{ secrets.GLADOS_PROXY_URL }}
+          # 仅提醒 GLaDOS 首次低奖励，不标记签到失败或自动补签；0 关闭提醒。
+          GLADOS_LOW_REWARD_THRESHOLD: ${{ vars.GLADOS_LOW_REWARD_THRESHOLD }}
           # 请求层有限重试：空值使用脚本默认值（3 次，间隔 10/20 秒）
           PANEL_MAX_ATTEMPTS: ${{ vars.PANEL_MAX_ATTEMPTS }}
           PANEL_RETRY_DELAY_SECONDS: ${{ vars.PANEL_RETRY_DELAY_SECONDS }}

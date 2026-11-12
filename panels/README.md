@@ -12,7 +12,7 @@
 | Railgun | `https://railgun.info` | `RAILGUN_ACCOUNTS_JSON` | `RAILGUN_USER_AGENT` |
 
 - 账号配置和推送密钥放在 **Secrets → New repository secret**，不要放进公开 Variables、代码或 Issue。
-- User-Agent 放在 **Variables → New repository variable**；放进同名 Secret 不会被当前工作流读取。
+- 面板 User-Agent 可放在 **Variables → New repository variable**，或同名 Secret；工作流优先读取非空 Variable，未设置时回退同名 Secret。账号级 `user_agent` 仍优先于面板配置。
 - 只使用一个站点时，仅配置该站点的账号 Secret，另一个留空。
 - Fork 用户先同步仓库代码，再填写自己的配置；同步代码不会同步或更新 Secrets。
 
@@ -87,7 +87,7 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 
 ## 4. User-Agent 和通知
 
-**原有 `email` + `cookie` 配置继续有效，不需要批量重配。** 默认使用固定 Windows Chrome 124 UA，与默认 `chrome124` 传输预设一致。已设置的面板 UA 保持原值，不会被自动改写。
+**原有 `email` + `cookie` 配置继续有效，不需要批量重配。** 默认使用固定 Windows Chrome 124 UA，与默认 `chrome124` 传输预设一致。不自动改写已配置 UA 的浏览器平台或版本，只移除复制时附带的 `User-Agent:` 前缀、成对外层引号及两端空格。控制字符、无法发送的字符、空值包装或重复包装会在创建 Session 前拒绝，错误不输出原始值。
 
 UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT` > 默认值。若登录浏览器在 macOS、Linux、手机或使用其他浏览器，请使用同一浏览器请求里的 UA。不同账号可以使用不同 UA，但不随机轮换。
 
@@ -117,6 +117,8 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 通常不需要指定 `impersonate`。自动选择同浏览器家族、相同或最接近版本的可用预设；没有合适预设时回退 `chrome124` 并提示。Safari、显式预设及缺少精确版本的情况按近似处理。Chromium 请求头提示会按 UA 构造，但 UA 与传输预设仍不等于完整真实浏览器环境，不能保证通过设备校验。
 
+请求显式携带 `Accept-Language` 和 `Sec-Fetch-Dest` / `Sec-Fetch-Mode` / `Sec-Fetch-Site`。日志只展示 UA 来源（账号、面板或默认）、传输预设、是否规范化，以及使用默认网络还是显式代理，不输出完整 UA。
+
 每个账号拥有独立的 HTTP Session 和 CookieJar，同账号的签到、状态、积分和重试复用该 Session，处理结束后关闭。**这不是独立真实浏览器，也不提供不同出口 IP**；GitHub Actions 上的多个账号通常仍共用运行器网络。不要把随机 UA 或 Session 隔离视为能消除风控。
 
 通知配置都是可选的。完整渠道列表见[根目录 README](../README.md) 的“通知渠道”章节，常见配置如下：
@@ -143,9 +145,40 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 任一账号的签到或查询失败、配置异常或已配置通知渠道失败都会使脚本返回非零状态，工作流标红；其他账号和站点仍继续处理。未配置站点或空数组不算失败。日志只展示账号序号和安全错误分类，不输出邮箱、Cookie、原始服务端错误文本或通知密钥；通知仍使用配置中的账号标识。
 
-定时为 UTC 的 `0 */8 * * *`，对应北京时间约 00:00、08:00、16:00；GitHub 调度可能延迟，并非保证精确到点。同分支工作流不并发执行、不取消正在运行的任务；单次任务上限 20 分钟。每次运行先执行不使用真实账号的离线回归测试，测试失败时不执行签到或诊断。
+定时为 UTC 的 `0 */8 * * *`，对应北京时间约 00:00、08:00、16:00；GitHub 调度可能延迟，并非保证精确到点。本仓库使用同一 `panels-checkin` 并发组，跨分支的定时、手动和只读诊断运行也互斥，不取消正在运行的任务；其他仓库不共享该限制，GitHub 并发组也不保证每个排队任务都被保留或按顺序执行。单次任务上限 20 分钟。每次运行从 `panels/requirements.txt` 安装固定版本的关键依赖，并先执行不使用真实账号的离线回归测试，测试失败时不执行签到或诊断。
 
 删除或清空某站的账号 Secret 可以停用该站；`[]` 也会按空账号列表跳过。禁用整个 `panels-checkin` 工作流会同时停止两个站点。
+
+### 奖励分类与低奖励提醒
+
+日志和通知保留服务端本次奖励，另外区分以下结果；累计积分仍来自后续积分接口，不能混作本次奖励：
+
+| 分类 | 含义 |
+|---|---|
+| `reward`（首次奖励） | 返回明确的 `Checkin! Got N Points`，记录本次奖励数值。 |
+| `free_reward`（免费账号奖励） | Railgun 返回带免费账号精确后缀的成功文案，记录本次奖励。 |
+| `observation`（今日观察已记录） | 返回 `Today's observation logged...`，不推断本次新增积分。 |
+| `repeated`（重复签到） | 返回明确的重复签到或今日已签到文案，不推断本次新增积分。 |
+
+只展示安全业务码、白名单 `reason` 和实际签到域名。业务码缺失显示 `missing`，格式异常显示 `invalid`；`reason` 缺失显示 `missing`，不在白名单中的值显示 `other`，不会原样转发服务端文本。成功后的查询失败仍保留已取得的奖励分类，不再次签到。只读诊断不获取这些签到结果。
+
+GLaDOS 的 `reward` 不超过阈值时，日志和通知增加“低奖励提醒”，**不因此标记失败、不重试或自动补签，也不认定原因是 IP 或风控**。Variable `GLADOS_LOW_REWARD_THRESHOLD` 默认 `2`，可设 `0` 到 `100` 的整数；`0` 关闭提醒，空值、非整数或越界使用默认值。Railgun、重复签到和观察记录不触发低奖励提醒。回归测试见 `test_outcomes.py`。
+
+### GLaDOS 可选代理 / WARP 入口
+
+默认不启用显式代理，保留原运行器网络和环境代理行为。只有在 Secret `GLADOS_PROXY_URL` 非空时，GLaDOS 的 challenge、签到、状态、积分、重试及备用域名请求才统一使用该代理；所有 GLaDOS 账号共用同一入口，不提供每账号独立出口。Railgun、其他签到站点和通知渠道不受该配置影响。
+
+支持 `http://`、`https://`、`socks5://`、`socks5h://`，必须有主机名和有效端口（如果指定），不能含原始空白、业务路径、查询参数或片段。需要代理认证时，用户名和密码中的特殊字符应做 URL 百分号编码，并将完整地址保存为 Secret，不要写进公开 Variable、日志或 Issue。无效配置在创建 Session 前失败，错误及诊断不输出代理地址或凭据。
+
+例如，**实际运行器内已经存在**监听 `127.0.0.1:40000` 的 SOCKS5 代理时，才可使用：
+
+```text
+socks5h://127.0.0.1:40000
+```
+
+GitHub 托管运行器的 `127.0.0.1` 不是你的本机；只在自己的电脑上启动 WARP，再填上述地址，不会让云端签到使用 WARP。代理必须部署在实际运行器中或是运行器可以访问的受控服务。显式代理模式关闭环境代理继承，避免 `NO_PROXY` 意外绕过配置；代理出错不会静默回退直连，仍按原请求策略有限重试或报错。
+
+**此入口只使用现有代理，不安装或启动 WARP、不修改系统路由、不验证 WARP 身份，也不保证奖励提高。** 是否低奖励与出口 IP 有关仍需跨天对比，不能靠代理连通或一次签到分值确认。首次启用可先使用 `diagnose_only` 核对登录状态；它仍只查询状态，不签到、不补差。回归见 `test_proxy.py`，包括只访问回环服务的真实代理路由与失败测试。
 
 ### 请求失败重试
 
@@ -211,16 +244,18 @@ GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.
 | 状态接口未返回有效账号数据 | 状态响应缺少脚本预期的 `data` 或数值格式异常。HTTP 200 也可能包含业务错误，任务会失败。 |
 | `device-mismatch`、`Automated check-in detected` | 核对 Cookie 与 UA 是否来自同一浏览器平台。只读账号查询成功也不保证签到设备校验通过。 |
 | `Checkin Repeats! Please Try Tomorrow` | 重复签到，不应反复重试。 |
+| GLaDOS 每个账号都获得 2 分或出现“低奖励提醒” | 明确奖励仍算签到成功，不自动补签。核对 UA 来源、规范化提示、传输预设和网络模式，并对照官网记录及跨天结果；不能仅凭这个分值认定原因是 IP、设备校验或平台统一降分。 |
 | `Today's observation logged. Return tomorrow for more points.` | 今日已记录，脚本按“今日已签到”展示，不代表每次调用都会增加积分。 |
 | `Already checked in today. Come back tomorrow.` | Railgun 的“今日已签到”响应；与 `code=1` 一起返回时也是正常结果，无需更换 Cookie 或重试。2026-11-04 实测确认登录及积分查询有效，旧版因未识别这条文案而误报失败。 |
 | `Checkin! Got 2 Points (Free account - upgrade for more!)` | Railgun 免费账号的成功响应，2026-11-06 的[公开日志](https://github.com/zzzmzz/railgun_checkin/actions/runs/42180464258)已记录 `code=0`。仅 Railgun 且 `code=0` / `"0"` 时接受这个精确后缀，积分取文案中的数值，并标注“免费账号奖励”；旧版要求文案在 `Points` 处结束，会误报失败并停止后续查询。其他后缀、缺失或失败业务码仍失败，认证和设备拒绝检查保持优先。 |
 | 剩余天数或积分未获取 | 请求失败会停止后续接口，未取得的值显示“未获取”；只有接口确实返回零积分才显示 `0`。 |
 | Actions 红色，但有账号签到成功 | 任一账号、后续查询或通知失败都会标红；查看安全错误分类和通知中的各账号结果，不代表所有账号都失败。 |
 | 通知去了旧企微群 | 检查是否保留 `PUSH_WEBHOOK_URL`，并设置对应站点的 `*_WECOM_WEBHOOK`。 |
+| 已填代理但请求异常 | 确认代理可从实际运行器访问；云端 `127.0.0.1` 不指向本机。显式代理故障不会自动直连，删除或清空 `GLADOS_PROXY_URL` 才恢复默认网络行为。 |
 
 2026-11-03 的只读排查已确认当时仓库中的 4 份 GLaDOS 凭据均含完整新版字段，但状态和积分接口仍返回 `code=-2`，且没有下发 `Set-Cookie`。因此，字段名已更新本身不能解决那次认证失败；现有证据也不能确定是正常到期、撤销还是旧会话被替换。
 
-本地运行时需要 `requests`、`curl_cffi`，并预先设置对应环境变量。`panels/checkin.py` 不自动读取 `.env`，`nodeseek/.env.example` 也不是面板脚本的自动配置入口。默认本地运行同样会真实签到和推送。只读诊断可从仓库根目录执行：
+本地运行建议使用 Python 3.11 或更新版本，并从仓库根目录执行 `python -m pip install -r panels/requirements.txt` 安装 `requests`、`curl_cffi` 的固定版本；工作流使用同一文件。安装位置和缓存应保持在自己指定的项目环境中。运行前预先设置对应环境变量。`panels/checkin.py` 不自动读取 `.env`，`nodeseek/.env.example` 也不是面板脚本的自动配置入口。默认本地运行同样会真实签到和推送。只读诊断可从仓库根目录执行：
 
 ```shell
 python -B panels/checkin.py --diagnose
@@ -228,7 +263,7 @@ python -B panels/checkin.py --diagnose
 
 也可设置 `PANEL_DIAGNOSTIC_ONLY=true`。无法识别的布尔值会直接失败，不意外执行签到。诊断仍使用账号凭据访问状态接口，但不发送签到 POST。
 
-只运行离线回归测试时，从仓库根目录执行以下命令，不使用真实 Cookie、不联网签到：
+只运行离线回归测试时，从仓库根目录执行以下命令，不使用真实 Cookie、不联网签到。已安装 `curl_cffi` 时，请求头和代理回归会启动仅绑定 `127.0.0.1` 的临时 HTTP 服务；未安装时这些真实传输测试跳过，不能替代依赖齐全时的验证：
 
 ```shell
 python -B -m unittest discover -s panels -p "test_*.py"
