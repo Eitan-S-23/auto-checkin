@@ -1,0 +1,158 @@
+name: LinuxSB compact points live validation
+on:
+  push:
+    branches:
+      - verify/linuxsb-points-caeb5e4
+permissions:
+  contents: read
+concurrency:
+  group: linuxsb-live-caeb5e4
+  cancel-in-progress: false
+jobs:
+  linuxsb:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    env:
+      TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      PYTHONPATH: ${{ github.workspace }}/.cache/linuxsb-deps
+      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/pip
+    steps:
+      - name: Checkout reviewed LinuxSB fix
+        uses: actions/checkout@v4
+        with:
+          ref: caeb5e4c09358c299da64ee51a7b60938892bfc1
+          persist-credentials: false
+          set-safe-directory: false
+      - name: Verify project-local output boundaries
+        run: |
+          python3 -B - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          root = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()).resolve(strict=True)
+          assert Path.cwd().resolve(strict=True) == root
+          assert Path(os.environ['GITHUB_WORKSPACE']).resolve(strict=True) == root
+          for relative in ('.cache/tmp', '.cache/pip', '.cache/python-tools', '.cache/linuxsb-deps', '.cache/browser-home'):
+              assert (root / relative).resolve().is_relative_to(root), relative
+          print('All controlled outputs are project-local')
+          PY
+      - name: Prepare project-local output directories
+        run: mkdir -p .cache/tmp .cache/pip .cache/python-tools .cache/linuxsb-deps .cache/browser-home/.cache .cache/browser-home/.config .cache/browser-home/.local/share
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        env:
+          AGENT_TOOLSDIRECTORY: ${{ github.workspace }}/.cache/python-tools
+          RUNNER_TOOL_CACHE: ${{ github.workspace }}/.cache/python-tools
+          RUNNER_TEMP: ${{ github.workspace }}/.cache/tmp
+          HOME: ${{ github.workspace }}/.cache/browser-home
+          TMPDIR: ${{ github.workspace }}/.cache/tmp
+          TMP: ${{ github.workspace }}/.cache/tmp
+          TEMP: ${{ github.workspace }}/.cache/tmp
+        with:
+          python-version: '3.11.8'
+      - name: Verify preinstalled browser tooling
+        env:
+          TMPDIR: ${{ github.workspace }}/.cache/tmp
+          TMP: ${{ github.workspace }}/.cache/tmp
+          TEMP: ${{ github.workspace }}/.cache/tmp
+        run: |
+          command -v xvfb-run
+          google-chrome --version
+          chromedriver --version
+      - name: Install project-local dependencies
+        env:
+          TMPDIR: ${{ github.workspace }}/.cache/tmp
+          TMP: ${{ github.workspace }}/.cache/tmp
+          TEMP: ${{ github.workspace }}/.cache/tmp
+        run: python -B -m pip --isolated --disable-pip-version-check install --no-compile --target .cache/linuxsb-deps --cache-dir .cache/pip -r nodeseek/requirements.txt
+      - name: Run LinuxSB offline regression tests
+        env:
+          TMPDIR: ${{ github.workspace }}/.cache/tmp
+          TMP: ${{ github.workspace }}/.cache/tmp
+          TEMP: ${{ github.workspace }}/.cache/tmp
+          LINUXSB_COOKIE: ''
+          LINUXSB_ACCOUNT: ''
+          LINUXSB_FORCE_BROWSER: ''
+          LINUXSB_DEBUG: ''
+        run: |
+          python -B - <<'PY'
+          import contextlib
+          import io
+          import sys
+          import unittest
+          suite = unittest.defaultTestLoader.discover('nodeseek', pattern='test_linuxsb.py')
+          logs = io.StringIO()
+          with contextlib.redirect_stdout(logs):
+              result = unittest.TextTestRunner(verbosity=1).run(suite)
+          if not result.wasSuccessful():
+              print(logs.getvalue()[-6000:])
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+      - name: Run one real LinuxSB check-in and notification
+        env:
+          TMPDIR: ${{ github.workspace }}/.cache/tmp
+          TMP: ${{ github.workspace }}/.cache/tmp
+          TEMP: ${{ github.workspace }}/.cache/tmp
+          HOME: ${{ github.workspace }}/.cache/browser-home
+          XDG_CACHE_HOME: ${{ github.workspace }}/.cache/browser-home/.cache
+          XDG_CONFIG_HOME: ${{ github.workspace }}/.cache/browser-home/.config
+          HEADLESS: 'false'
+          SITE_GAP_MIN: '0'
+          SITE_GAP_MAX: '0'
+          LINUXSB_FORCE_BROWSER: ''
+          LINUXSB_DEBUG: ''
+          LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
+          LINUXSB_ACCOUNT: ${{ secrets.LINUXSB_ACCOUNT }}
+          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+          TG_API_HOST: ${{ secrets.TG_API_HOST }}
+          TG_PROXY: ${{ secrets.TG_PROXY }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+          WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
+          WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+          WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_PRIORITY: ${{ secrets.NTFY_PRIORITY }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+          LINUXSB_PUSH_WEBHOOK_URL: ${{ secrets.LINUXSB_PUSH_WEBHOOK_URL }}
+          LINUXSB_TG_BOT_TOKEN: ${{ secrets.LINUXSB_TG_BOT_TOKEN }}
+          LINUXSB_TG_USER_ID: ${{ secrets.LINUXSB_TG_USER_ID }}
+          LINUXSB_TG_API_HOST: ${{ secrets.LINUXSB_TG_API_HOST }}
+          LINUXSB_TG_PROXY: ${{ secrets.LINUXSB_TG_PROXY }}
+          LINUXSB_FEISHU_WEBHOOK: ${{ secrets.LINUXSB_FEISHU_WEBHOOK }}
+          LINUXSB_DINGTALK_WEBHOOK: ${{ secrets.LINUXSB_DINGTALK_WEBHOOK }}
+          LINUXSB_DINGTALK_SECRET: ${{ secrets.LINUXSB_DINGTALK_SECRET }}
+          LINUXSB_WECOM_WEBHOOK: ${{ secrets.LINUXSB_WECOM_WEBHOOK }}
+          LINUXSB_WECOM_CORPID: ${{ secrets.LINUXSB_WECOM_CORPID }}
+          LINUXSB_WECOM_CORPSECRET: ${{ secrets.LINUXSB_WECOM_CORPSECRET }}
+          LINUXSB_WECOM_AGENTID: ${{ secrets.LINUXSB_WECOM_AGENTID }}
+          LINUXSB_WECOM_TOUSER: ${{ secrets.LINUXSB_WECOM_TOUSER }}
+          LINUXSB_BARK_URL: ${{ secrets.LINUXSB_BARK_URL }}
+          LINUXSB_SERVERCHAN_KEY: ${{ secrets.LINUXSB_SERVERCHAN_KEY }}
+          LINUXSB_PUSHPLUS_TOKEN: ${{ secrets.LINUXSB_PUSHPLUS_TOKEN }}
+          LINUXSB_PUSHPLUS_TOPIC: ${{ secrets.LINUXSB_PUSHPLUS_TOPIC }}
+          LINUXSB_NTFY_URL: ${{ secrets.LINUXSB_NTFY_URL }}
+          LINUXSB_NTFY_TOPIC: ${{ secrets.LINUXSB_NTFY_TOPIC }}
+          LINUXSB_NTFY_PRIORITY: ${{ secrets.LINUXSB_NTFY_PRIORITY }}
+          LINUXSB_GOTIFY_URL: ${{ secrets.LINUXSB_GOTIFY_URL }}
+          LINUXSB_GOTIFY_TOKEN: ${{ secrets.LINUXSB_GOTIFY_TOKEN }}
+          LINUXSB_GOTIFY_PRIORITY: ${{ secrets.LINUXSB_GOTIFY_PRIORITY }}
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" python -B nodeseek/linuxsb_daily.py
