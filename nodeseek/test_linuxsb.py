@@ -243,6 +243,37 @@ class ExtractCheckinMetaTestCase(unittest.TestCase):
         found = dict(daily.extract_checkin_meta(html))
         self.assertEqual(found.get("积分"), "88")
 
+    def test_compact_points_keep_decimal_and_unit(self):
+        for label in ("当前积分", "积分"):
+            for value in ("5K", "5.25K", "12.5k", "2M", "1.25m", "1,234.5K"):
+                with self.subTest(label=label, value=value):
+                    html = f"<div>{label}：{value}</div><div>连续签到 5 天</div>"
+                    found = dict(daily.extract_checkin_meta(html))
+                    self.assertEqual(found.get(label), value)
+                    self.assertEqual(found.get("连续签到"), "5 天")
+
+    def test_decimal_and_comma_point_values_are_not_truncated(self):
+        for value in ("88.5", "1,234.50", "0.25"):
+            with self.subTest(value=value):
+                found = dict(daily.extract_checkin_meta(f"<div>积分：{value}</div>"))
+                self.assertEqual(found.get("积分"), value)
+
+    def test_compact_units_in_html_elements_and_entities_are_preserved(self):
+        pages = (
+            '<div>{label}：<span>5.25</span><small>K</small></div>',
+            '<div>{label}&nbsp;：&nbsp;<span>5.25</span>&nbsp;<small>K</small></div>',
+        )
+        for label in ("当前积分", "积分"):
+            for page in pages:
+                with self.subTest(label=label, page=page):
+                    found = dict(daily.extract_checkin_meta(page.format(label=label)))
+                    self.assertEqual(found.get(label), "5.25 K")
+
+    def test_unknown_units_and_malformed_numbers_do_not_return_a_prefix(self):
+        for value in ("5KB", "5.25KB", "5e3", "5.25.6K"):
+            with self.subTest(value=value):
+                self.assertEqual(daily.extract_checkin_meta(f"<div>积分：{value}</div>"), [])
+
     def test_无积分信息时返回空(self):
         self.assertEqual(daily.extract_checkin_meta("<html>请先登录</html>"), [])
 
@@ -1026,6 +1057,14 @@ class CheckinInBrowserTestCase(unittest.TestCase):
         self.assertEqual(driver.async_scripts, [])
         self.assertEqual(username, "烧饼爱好者")
 
+    def test_browser_overview_preserves_compact_point_value(self):
+        page = BROWSER_PAGE_CHECKED.replace("当前积分：888", "当前积分：5.25K")
+        driver = FakeDriver(page)
+        lines, _ = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("当前积分: 5.25K", lines)
+        self.assertNotIn("当前积分: 5", lines)
+        self.assertEqual(driver.async_scripts, [])
+
     def test_用浏览器现场的bbs_csrf签到并提取概览(self):
         driver = FakeDriver(
             BROWSER_PAGE_UNCHECKED,
@@ -1309,6 +1348,26 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("签到结果: 签到成功", content)
         self.assertIn("当前积分: 888", content)
         self.assertIn("连续签到: 3 天", content)
+
+    def test_notification_preserves_compact_point_values_for_each_account(self):
+        os.environ["LINUXSB_COOKIE"] = "a=1&b=2"
+
+        def get_handler(url, headers=None, cookies=None, timeout=None):
+            value = "5K" if (cookies or {}).get("a") == "1" else "5.25k"
+            page = PAGE_UNCHECKED.replace("</body>", f"<div>积分：{value}</div></body>")
+            return FakeResponse(text=page)
+
+        with mock.patch.object(daily.requests, "get", side_effect=get_handler), \
+             fake_post({"ok": 1, "message": ""}), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        send_mock.assert_called_once()
+        self.assertEqual(send_mock.call_args.kwargs["scope"], "LINUXSB")
+        lines = send_mock.call_args.args[1].splitlines()
+        self.assertIn("积分: 5K", lines)
+        self.assertIn("积分: 5.25k", lines)
+        self.assertNotIn("积分: 5", lines)
 
     def test_日志不输出用户名只输出账号号(self):
         """用户名只进通知；日志（公开仓库 Actions 页面可见）只显示「账号 N」"""

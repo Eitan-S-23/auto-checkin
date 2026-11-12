@@ -39,6 +39,7 @@ import random
 import sys
 import time
 import traceback
+from html import unescape
 
 import requests
 
@@ -941,9 +942,10 @@ def extract_checkin_meta(html):
     只匹配显式格式（「当前积分：888」「积分：888」），避免把「积分规则」
     「获得积分 +10」等噪音当作积分；站点模板不同则抓不到，抓不到时返回空列表，
     不影响签到结果。
-    返回格式：[("当前积分", "1,234"), ("连续签到", "5 天")]
+    积分保留页面显示的小数及 K/M 单位，不把缩写值换算成精确整数。
+    返回格式：[("当前积分", "5.2K"), ("连续签到", "5 天")]
     """
-    text = re.sub(r"<[^>]+>", " ", html)
+    text = unescape(re.sub(r"<[^>]+>", " ", html))
     # <!---- 注释 --> 内容也可能残留数字，先去除注释
     text = re.sub(r"<!--[\s\S]*?-->", " ", text)
     text = re.sub(r"\s+", " ", text)
@@ -960,8 +962,9 @@ def extract_checkin_meta(html):
     # 显式格式优先：「当前积分」命中后不再尝试「积分」；
     # 「积分」允许词与冒号间有空格（「积分 ： 88」），但冒号可省，
     # 数字前的干扰符号（如「获得积分 +10」的 +）会阻止匹配
-    if not try_find("当前积分", r"当前积分[:：]?\s*([\d,]+)"):
-        try_find("积分", r"积分\s*[:：]?\s*([\d,]+)")
+    points_value = r"(\d[\d,]*(?:\.\d+)?(?:\s*[KkMm])?)(?![\d.,A-Za-z])"
+    if not try_find("当前积分", rf"当前积分\s*[:：]?\s*{points_value}"):
+        try_find("积分", rf"积分\s*[:：]?\s*{points_value}")
     try_find("连续签到", r"连续签到\s*[:：]?\s*(\d+)\s*天", " 天")
     return found
 
