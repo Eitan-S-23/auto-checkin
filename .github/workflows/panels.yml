@@ -49,6 +49,7 @@ jobs:
       GLADOS_BROWSER_CHECKIN: ${{ vars.GLADOS_BROWSER_CHECKIN || '1' }}
       GLADOS_BROWSER_REQUIRED: ${{ secrets.GLADOS_ACCOUNTS_JSON != '' && (inputs.verify_only || (!inputs.diagnose_only && (vars.GLADOS_BROWSER_CHECKIN || '1') != '0' && (vars.GLADOS_BROWSER_CHECKIN || '1') != 'false')) }}
       GLADOS_EMAIL_RECOVERY_ENABLED: ${{ secrets.GLADOS_GMAIL_ADDRESS != '' && secrets.GLADOS_GMAIL_APP_PASSWORD != '' && secrets.GLADOS_COOKIE_STORE_KEY != '' }}
+      GLADOS_MANUAL_SESSION_CACHE: ${{ vars.GLADOS_MANUAL_SESSION_CACHE || '1' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,9 +87,10 @@ jobs:
           GLADOS_VERIFY_ONLY: '0'
           GLADOS_BROWSER_TESTS: ${{ env.GLADOS_BROWSER_REQUIRED == 'true' && '1' || '0' }}
           GLADOS_BROWSER_TEST_HEADLESS: '0'
+          GLADOS_MANUAL_SESSION_CACHE: '0'
 
       - name: Restore encrypted GLaDOS sessions
-        if: ${{ env.GLADOS_BROWSER_REQUIRED == 'true' && env.GLADOS_EMAIL_RECOVERY_ENABLED == 'true' && !inputs.diagnose_only }}
+        if: ${{ env.GLADOS_BROWSER_REQUIRED == 'true' && (env.GLADOS_EMAIL_RECOVERY_ENABLED == 'true' || env.GLADOS_MANUAL_SESSION_CACHE == '1' || env.GLADOS_MANUAL_SESSION_CACHE == 'true') && !inputs.diagnose_only }}
         uses: actions/cache/restore@v4
         with:
           path: .cache/panels/sessions.enc
@@ -209,7 +211,7 @@ jobs:
           RAILGUN_GOTIFY_PRIORITY: ${{ secrets.RAILGUN_GOTIFY_PRIORITY }}
 
       - name: Save encrypted GLaDOS sessions
-        if: ${{ always() && env.GLADOS_BROWSER_REQUIRED == 'true' && env.GLADOS_EMAIL_RECOVERY_ENABLED == 'true' && !inputs.diagnose_only && !inputs.verify_only && hashFiles('.cache/panels/sessions.enc') != '' }}
+        if: ${{ always() && env.GLADOS_BROWSER_REQUIRED == 'true' && (env.GLADOS_EMAIL_RECOVERY_ENABLED == 'true' || env.GLADOS_MANUAL_SESSION_CACHE == '1' || env.GLADOS_MANUAL_SESSION_CACHE == 'true') && !inputs.diagnose_only && !inputs.verify_only && hashFiles('.cache/panels/sessions.enc') != '' }}
         uses: actions/cache/save@v4
         with:
           path: .cache/panels/sessions.enc

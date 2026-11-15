@@ -1,0 +1,96 @@
+name: glados-manual-login
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/glados-manual-login.trigger']
+  workflow_dispatch:
+    inputs:
+      account:
+        description: GLaDOS account index to log in and check in (one account only)
+        type: number
+        default: 1
+
+concurrency:
+  group: panels-checkin
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  login:
+    if: ${{ github.event_name != 'push' || contains(github.event.head_commit.message, '[glados-manual-login]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONPATH: ${{ github.workspace }}/.cache/panels/deps
+      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/panels/pip
+      PIP_CONFIG_FILE: /dev/null
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_INPUT: '1'
+      SSLKEYLOGFILE: ''
+      TMPDIR: ${{ github.workspace }}/.cache/panels/tmp
+      TMP: ${{ github.workspace }}/.cache/panels/tmp
+      TEMP: ${{ github.workspace }}/.cache/panels/tmp
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/panels/browsers
+      GLADOS_RUNTIME_DIR: ${{ github.workspace }}/.cache/panels
+      GLADOS_MANUAL_SESSION_CACHE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Prepare project runtime
+        run: mkdir -p "$TMPDIR" "$PYTHONPATH" "$PIP_CACHE_DIR" "$PLAYWRIGHT_BROWSERS_PATH"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check --no-compile --target "$PYTHONPATH" -r panels/requirements.txt
+      - name: Check native Chrome and virtual display
+        run: |
+          command -v google-chrome
+          command -v xvfb-run
+          google-chrome --version
+      - name: Offline manual-login regressions
+        run: python -B -m unittest discover -s panels -p 'test_glados_manual.py'
+        env:
+          GLADOS_MANUAL_SESSION_CACHE: '0'
+      - name: Restore encrypted GLaDOS sessions
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/panels/sessions.enc
+          key: glados-sessions-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: glados-sessions-v1-${{ github.ref_name }}-
+      - name: Request one code in the native cloud browser
+        run: python -B panels/glados_manual.py start
+        env:
+          GLADOS_MANUAL_ACCOUNT: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.account) || '' }}
+          GLADOS_ACCOUNTS_JSON: ${{ secrets.GLADOS_ACCOUNTS_JSON }}
+          GLADOS_COOKIE_STORE_KEY: ${{ secrets.GLADOS_COOKIE_STORE_KEY }}
+          GLADOS_PROXY_URL: ${{ secrets.GLADOS_PROXY_URL }}
+          GLADOS_RELAY_TOKEN: ${{ github.token }}
+      - name: Publish public code-encryption challenge only
+        uses: actions/upload-artifact@v4
+        with:
+          name: glados-manual-challenge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/panels/manual-${{ github.run_id }}-${{ github.run_attempt }}/challenge.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Wait for the encrypted reply and report real check-in result
+        run: python -B panels/glados_manual.py wait
+      - name: Save encrypted GLaDOS sessions
+        if: ${{ always() && hashFiles(format('.cache/panels/manual-{0}-{1}/cache-ready.json', github.run_id, github.run_attempt)) != '' && hashFiles('.cache/panels/sessions.enc') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/panels/sessions.enc
+          key: glados-sessions-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Stop only this run's owned worker
+        if: always()
+        run: python -B panels/glados_manual.py cleanup

@@ -4,6 +4,7 @@ from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
+import base64
 import imaplib
 import json
 import os
@@ -12,7 +13,7 @@ import ssl
 import tempfile
 import time
 
-from glados_common import (GladosError, ORIGINS, auth_denied, complete_session,
+from glados_common import (GladosError, ORIGINS, auth_denied, bool_setting, complete_session,
                            email_address, int_setting)
 from glados_runtime import RuntimePaths, project_path
 
@@ -29,7 +30,7 @@ class MailSettings:
     def from_environment(cls):
         names = ("GLADOS_GMAIL_ADDRESS", "GLADOS_GMAIL_APP_PASSWORD", "GLADOS_COOKIE_STORE_KEY")
         address, password, key = (os.getenv(name, "").strip() for name in names)
-        if not any((address, password, key)):
+        if not any((address, password)):
             return None
         if not all((address, password, key)):
             raise GladosError("Email recovery requires all three GLADOS Gmail/cache Secrets", kind="config")
@@ -42,6 +43,41 @@ class MailSettings:
         if not senders or any(not re.fullmatch(r"[A-Za-z0-9@._+-]+", item) for item in senders):
             raise GladosError("GLADOS_GMAIL_SENDERS must contain sender addresses or domains", kind="config")
         return cls(address, password, key, senders, int_setting("GLADOS_GMAIL_WAIT_SECONDS", 120, 10, 600))
+
+
+def session_cache_key(raw):
+    explicit = os.getenv("GLADOS_COOKIE_STORE_KEY", "").strip()
+    if explicit:
+        return explicit
+    if not bool_setting("GLADOS_MANUAL_SESSION_CACHE", False):
+        return ""
+    try:
+        accounts = json.loads(raw)
+        if not isinstance(accounts, list) or not accounts:
+            raise ValueError
+        signatures = []
+        for account in accounts:
+            cookie = account.get("cookie", "")
+            if not isinstance(cookie, str) or any(char in cookie for char in "\r\n"):
+                raise ValueError
+            for part in cookie.split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name.endswith(":sess.sig"):
+                    if (len(value) < 20 or not re.fullmatch(r"[A-Za-z0-9_+/=-]+", value) or
+                            len(set(value)) < 10):
+                        raise ValueError
+                    signatures.append(value)
+        if not signatures:
+            raise ValueError
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        # Existing signed Cookie Secrets supply the entropy, never public account labels.
+        material = json.dumps(sorted(set(signatures)), separators=(",", ":")).encode("ascii")
+        derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                       info=b"glados-manual-session-cache-v1").derive(material)
+        return base64.urlsafe_b64encode(derived).decode("ascii")
+    except (ValueError, TypeError, AttributeError, ImportError, UnicodeError):
+        raise GladosError("Manual session cache needs existing signed Cookie Secrets or a Fernet key", kind="config") from None
 
 
 class CookieStore:

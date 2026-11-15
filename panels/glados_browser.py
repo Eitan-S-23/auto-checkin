@@ -271,6 +271,106 @@ class NativeBrowser:
                 raise
             print("[GLaDOS] Browser cleanup failed; the original task failure is preserved")
 
+    def login_with_code(self, origin, email, code_provider):
+        if origin not in self.origins:
+            raise GladosError("Login origin is not approved", kind="config")
+        options = {"locale": BROWSER_LOCALE, "service_workers": "block"}
+        if self.proxy:
+            options["proxy"] = self.proxy
+        context = self.browser.new_context(**options)
+        allowed = {"path": None, "payload": None}
+        submitted = set()
+        core = urlsplit(origin)
+        page = context.new_page()
+
+        def guard(route):
+            request = route.request
+            url = urlsplit(request.url)
+            same_origin = (url.scheme, url.netloc) == (core.scheme, core.netloc)
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                if same_origin and url.path.startswith("/cdn-cgi/challenge-platform/"):
+                    route.continue_()
+                    return
+                if same_origin:
+                    if (request.method != "POST" or url.path != allowed["path"] or url.path in submitted or
+                            url.path not in ("/api/authorization", "/api/login")):
+                        route.abort()
+                        return
+                    try:
+                        if request.post_data_json != allowed["payload"]:
+                            raise ValueError
+                    except Exception:
+                        route.abort()
+                        return
+                    submitted.add(url.path)
+                elif url.hostname != TURNSTILE_HOST:
+                    route.abort()
+                    return
+            if request.is_navigation_request() and request.frame == page.main_frame and not same_origin:
+                route.abort()
+                return
+            route.continue_()
+
+        def request(path, payload=None):
+            allowed["path"] = path if payload is not None else None
+            allowed["payload"] = payload
+            try:
+                result = page.evaluate("""async ({path, payload}) => {
+                    const options = {method: payload === null ? 'GET' : 'POST',
+                        credentials: 'include', cache: 'no-store', redirect: 'error',
+                        signal: AbortSignal.timeout(15000)};
+                    if (payload !== null) {
+                        options.headers = {'Content-Type': 'application/json'};
+                        options.body = JSON.stringify(payload);
+                    }
+                    const response = await fetch(path, options);
+                    const text = await response.text();
+                    if (text.length > 1048576) throw new Error('Response too large');
+                    return {status: response.status, data: JSON.parse(text)};
+                }""", {"path": path, "payload": payload})
+                if (not isinstance(result, dict) or result.get("status") != 200 or
+                        not isinstance(result.get("data"), dict)):
+                    raise ValueError
+                return result["data"]
+            except Exception:
+                raise GladosError("Native browser authentication request failed; not retried", kind="auth-request") from None
+            finally:
+                allowed["path"] = None
+                allowed["payload"] = None
+
+        try:
+            context.set_default_timeout(self.timeout)
+            context.route("**/*", guard)
+            page.goto(origin + "/login", wait_until="domcontentloaded")
+            sent = request("/api/authorization", {"address": email, "site": "glados.network"})
+            safe_code = sent.get("code") if type(sent.get("code")) is int else "invalid"
+            print(f"[GLaDOS] Email authorization result: code={safe_code}, captcha_required={bool(sent.get('captcha_required'))}", flush=True)
+            if sent.get("captcha_required") or type(sent.get("code")) is not int or sent["code"] != 0:
+                raise GladosError("Email authorization refused or requires additional manual verification", kind="auth")
+            code = code_provider()
+            if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+                raise GladosError("Manual verification code must contain six digits", kind="auth")
+            logged_in = request("/api/login", {"method": "email", "site": "glados.network",
+                                              "email": email, "mailcode": code})
+            code = None
+            safe_code = logged_in.get("code") if type(logged_in.get("code")) is int else "invalid"
+            print(f"[GLaDOS] Manual email login result: code={safe_code}", flush=True)
+            if type(logged_in.get("code")) is not int or logged_in["code"] != 0:
+                raise GladosError("Manual email login was rejected; no extra code requested", kind="auth")
+            status = request("/api/user/status")
+            data = status.get("data")
+            if (type(status.get("code")) is not int or status["code"] != 0 or not isinstance(data, dict) or
+                    not isinstance(data.get("email"), str) or data["email"].strip().lower() != email):
+                raise GladosError("Manual login did not establish the expected account identity", kind="identity")
+            print("[GLaDOS] Manual email login established a verified native Chrome session", flush=True)
+            return BrowserReply(status, context.cookies(origin))
+        except GladosError:
+            raise
+        except Exception:
+            raise GladosError("Manual native browser login failed; not retried", kind="auth-request") from None
+        finally:
+            context.close()
+
     def run(self, origin, cookies, *, expected_email=None, verify_only=False):
         if origin not in self.origins:
             raise GladosError("Browser origin is not an approved GLaDOS origin", kind="config")

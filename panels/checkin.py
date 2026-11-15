@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import Request
 
 from curl_cffi import requests as cffi_requests
-from glados_auth import CookieStore, EmailRecovery, MailSettings
+from glados_auth import CookieStore, EmailRecovery, MailSettings, session_cache_key
 from glados_browser import NativeBrowser
 from glados_common import (BROWSER_LOCALE, CHALLENGE_DELAY, CHALLENGE_SUFFIX, EMAIL, GladosError, ORIGINS,
                            auth_denied, bool_setting, email_address, turnstile_denied)
@@ -819,7 +819,7 @@ def process_browser_account(panel, account, browser, *, recovery=None, store=Non
                 client.accept_browser_cookies(reply.cookies)
             if auth_denied(reply.payload):
                 if recovery is None or verify_only or logged_in:
-                    raise PanelRequestError("登录会话失效或设备不一致，请更新 Cookie 或配置邮箱恢复", kind="auth")
+                    raise PanelRequestError("登录会话失效或设备不一致，请人工接码恢复登录、更新 Cookie 或配置邮箱恢复", kind="auth")
                 recovery.login(client, expected_email)
                 reply = browser.run(client.panel["origin"], client.browser_cookies(), expected_email=expected_email)
                 if reply.cookies and not auth_denied(reply.payload):
@@ -881,7 +881,7 @@ def checkin_panel(panel, diagnostic=False, verify_only=False):
             return collect_accounts(panel, accounts, title, diagnostic)
         paths = RuntimePaths()
         settings = None if verify_only else MailSettings.from_environment()
-        key = settings.key if settings else (os.getenv("GLADOS_COOKIE_STORE_KEY", "").strip() if verify_only else "")
+        key = settings.key if settings else session_cache_key(raw)
         store = CookieStore(key, paths) if key else None
         recovery = EmailRecovery(settings, store) if settings else None
         with NativeBrowser(proxy=configured_proxy(panel), runtime=paths) as browser:
@@ -921,9 +921,9 @@ def collect_accounts(panel, accounts, title, diagnostic=False, *, browser=None, 
         msg_list.append(f"🎯 积分：{result.points}")
         msg_list.append(f"📶 流量已用：{result.traffic} GB")
         if result.cookie_updated:
-            if recovery is not None:
-                msg_list.append("会话 Cookie 有变化；邮箱模式仅使用项目内加密缓存，不写回 Secret")
-                print(f"[{panel['name']}] 账号{idx}: 邮箱会话使用项目内加密缓存，不写回 Secret")
+            if store is not None:
+                msg_list.append("会话 Cookie 有变化；仅使用项目内加密缓存，不写回 Secret")
+                print(f"[{panel['name']}] 账号{idx}: 会话使用项目内加密缓存，不写回 Secret")
             else:
                 msg_list.append("会话 Cookie 有变化，仅用于本次运行，未写回 Secret")
                 print(f"[{panel['name']}] 账号{idx}: 会话 Cookie 有变化，仅保存在内存中")

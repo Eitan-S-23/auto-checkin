@@ -108,7 +108,19 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 | 本地环境 `GLADOS_BROWSER_EXECUTABLE` | 自动查找 | 可指定已安装的 Chrome/Edge 可执行文件，只作为程序输入。 |
 | 本地环境 `GLADOS_RUNTIME_DIR` | `.cache/panels` | 必须解析到本项目内，项目外路径或指向项目外的链接会被拒绝。 |
 
-### 可选 Gmail 恢复和加密缓存
+### 人工接码登录（不需要 Gmail）
+
+`glados-manual-login` 是单账号实验入口：运行器的原生 Chrome 请求一次邮件验证码，等待人工回码，在同一云端浏览器环境完成登录，再实际签到。它不运行其他站点、不兑换积分，也不反复请求验证码。每次只选择 `GLADOS_ACCOUNTS_JSON` 中的一个账号，`email` 必须是真实登录邮箱。
+
+运行 **Actions → glados-manual-login → Run workflow**，`account` 填账号序号。只有修改 `.github/glados-manual-login.trigger` 并使用包含 `[glados-manual-login]` 的提交说明推送到 `main`，才会通过 SSH 推送入口触发；普通提交和回码文件更新不触发签到。与正式面板任务共用并发组。
+
+发码成功后只上传 `glados-manual-challenge-<run>-<attempt>` 公钥 artifact，不上传验证码、Cookie、私钥或浏览器截图。接码等待最多 10 分钟。人工处理端使用该公钥，在本机通过 `panels/glados_manual.py encrypt --challenge-base64 <公钥描述的Base64>` 从标准输入读取六位验证码，再将输出的密文 JSON 写入 `.github/glados-manual.reply.json` 并推送。不得把明文验证码放进 workflow inputs、提交、日志或 artifact。密文绑定运行 ID、尝试次数、账号序号和随机 challenge，旧回码不会在新运行中使用。
+
+正常工作流默认启用 `GLADOS_MANUAL_SESSION_CACHE=1`，可以在 Variables 设为 `0` 禁用。会话仍仅保存为 `.cache/panels/sessions.enc` 的 Fernet 密文并通过 Actions cache 复用；有 `GLADOS_COOKIE_STORE_KEY` 时优先使用，否则从现有账号 Secret 内的高熵会话签名按 HKDF-SHA256 派生固定密钥，不从公开邮箱或备注派生。无需为此配置 Gmail 或额外 PAT，但改变原 Cookie Secret 会使派生密钥变化，需要重新建立缓存。缓存不能代替有效登录，会话失效时仍需人工恢复。
+
+这个入口需要用真实账号验收。原生浏览器验证就绪、登录成功、重复签到和首次发奖是不同结果，日志按实际业务分类报告；遇到额外登录人机校验、Turnstile 拒绝、错误验证码或结果未知时停止，不承诺签到一定成功。
+
+### Gmail 自动恢复
 
 沿用原 `GLADOS_ACCOUNTS_JSON`，额外配置三个 **Secrets**，必须一起填写：
 
@@ -132,7 +144,7 @@ Variable `GLADOS_GMAIL_WAIT_SECONDS` 默认 `120`，范围 `10` 到 `600` 秒。
 
 会话按真实邮箱和来源域名绑定，原子写入 `.cache/panels/sessions.enc`，仅此加密文件通过 Actions cache 恢复/保存；密钥只来自 Secret。运行器缓存可能被淘汰，旧密钥无法解密时不会盲用缓存。浏览器明文临时配置在结束时清理，整个 `.cache/` 已忽略，不写回账号 Secret。换密钥后需重新建立有效会话。
 
-未配置这三个 Secrets 时，仍可用有效 Cookie 签到，但不自动登录或跨次缓存会话；不应将此配置缺失误报为 Cookie 自然到期。
+未配置 Gmail Secrets 时，仍可用有效 Cookie 签到，但不自动读取邮件恢复登录；人工接码方式及其加密缓存见上节。不应将 Gmail 配置缺失误报为 Cookie 自然到期。
 
 ### 旧 HTTP 方式的 User-Agent
 
