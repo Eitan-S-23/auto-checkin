@@ -97,7 +97,7 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 
 原生 Chrome 使用非零的本地调试端口，并通过 CDP 核对浏览器 PID。不会使用会设置自动化标志的 `--remote-debugging-port=0`，也不通过脚本篡改 `navigator.webdriver`；有头模式在导入账号 Cookie 前检查该标志为 `false`。CI 的回环模拟测试同样在 Xvfb 有头环境执行，避免只测试 headless 而漏掉此差异。
 
-真实浏览器模拟测试统一使用 `glados_test_support.native_fixture_runtime()` 构造运行路径。POSIX 系统的 Chrome 临时目录固定在项目内较短的 `.cache/panels/tmp`，避免把 `TMPDIR` 嵌入每个测试的深层目录后超出 Unix 套接字路径长度限制；其他测试状态及锁仍按测试实例隔离。新增登录或浏览器测试也必须复用该构造函数，不能只在 Windows 本地验证后就认定 Linux CI 可用。
+真实浏览器模拟测试统一使用 `glados_test_support.native_fixture_runtime()` 构造运行路径。POSIX 系统的 Chrome 临时目录固定在项目内较短的 `.cache/panels/tmp`，避免把 `TMPDIR` 嵌入每个测试的深层目录后超出 Unix 套接字路径长度限制；其他测试状态及锁仍按测试实例隔离。清理断言应核对本次创建的 profile 已删除、原有 profile 保持不变，不能要求共享目录全局为空。新增登录或浏览器测试也必须复用该构造函数，不能只在 Windows 本地验证后就认定 Linux CI 可用。
 
 `panels-tests` 独立工作流在相关代码推送或 PR 时运行完整离线回归，也可手动触发。它使用与定时面板工作流相同的 Ubuntu 24.04、Python 3.11、原生 Chrome 和 Xvfb 有头环境；不读取账号 Secret，不调用真实登录或签到接口，不读取或写入真实会话缓存。
 

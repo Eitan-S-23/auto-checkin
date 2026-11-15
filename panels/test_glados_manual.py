@@ -286,15 +286,19 @@ class NativeLoginFixtureTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(prefix="login-", dir=str(parent)) as directory:
                 origin = "http://127.0.0.1:" + str(server.server_address[1])
                 runtime = native_fixture_runtime(directory)
+                profiles_before = set(runtime.tmp.glob("chrome-*"))
                 headless = os.getenv("GLADOS_BROWSER_TEST_HEADLESS", "1") != "0"
                 with NativeBrowser(runtime=runtime, headless=headless, origins=(origin,)) as browser:
+                    profile = browser.profile
+                    self.assertNotIn(profile, profiles_before)
                     reply = browser.login_with_code(origin, "alice@example.net", lambda: "123456")
                     ua = browser.user_agent
                 self.assertEqual(reply.payload["code"], 0)
                 self.assertEqual({value["name"] for value in reply.cookies}, {"gld:sess", "gld:sess.sig"})
                 self.assertEqual([value[0] for value in requests], ["/api/authorization", "/api/login"])
                 self.assertTrue(all(value[2] == ua for value in requests))
-                self.assertFalse(list(runtime.tmp.glob("chrome-*")))
+                self.assertFalse(profile.exists())
+                self.assertEqual(set(runtime.tmp.glob("chrome-*")), profiles_before)
                 self.assertFalse((runtime.base / "browser.lock").exists())
         finally:
             server.shutdown()

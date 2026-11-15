@@ -53,6 +53,21 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertEqual(runtime.tmp, runtime.base / "tmp")
         self.assertEqual(runtime.child_environment()["TEMP"], str(runtime.tmp))
 
+    def test_shared_fixture_tmp_preserves_other_owned_profiles(self):
+        with mock.patch.object(glados_test_support, "os", SimpleNamespace(name="posix")):
+            first = native_fixture_runtime(self.paths.base / "first")
+            second = native_fixture_runtime(self.paths.base / "second")
+        with RunLock(first), RunLock(second):
+            first_profile = first.new_profile()
+            self.addCleanup(first.remove_profile, first_profile)
+            second_profile = second.new_profile()
+            self.addCleanup(second.remove_profile, second_profile)
+            self.assertEqual(first_profile.parent, second_profile.parent)
+            self.assertNotEqual(first_profile, second_profile)
+            first.remove_profile(first_profile)
+            self.assertFalse(first_profile.exists())
+            self.assertTrue(second_profile.exists())
+
     def test_driver_environment_is_restored_without_external_outputs(self):
         self.paths.ensure()
         with mock.patch.dict(os.environ, {"TEMP": "unapproved", "SSLKEYLOGFILE": "unapproved"}):
