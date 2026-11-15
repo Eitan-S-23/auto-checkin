@@ -368,7 +368,11 @@ class NativeFixtureTestCase(unittest.TestCase):
         cls.origin = "http://127.0.0.1:" + str(cls.server.server_port)
         cls.environment = mock.patch.dict(os.environ, {"CI": "true", "GLADOS_BROWSER_CHANNEL": "chrome"})
         cls.environment.start()
-        cls.browser = NativeBrowser(runtime=RuntimePaths(cls.directory.name), headless=True, origins=(cls.origin,))
+        runtime = RuntimePaths(cls.directory.name)
+        if os.name == "posix":
+            # Chrome's SingletonSocket cannot fit under the nested fixture TMPDIR.
+            runtime.tmp = parent
+        cls.browser = NativeBrowser(runtime=runtime, headless=True, origins=(cls.origin,))
         try:
             cls.browser.__enter__()
         except Exception:
