@@ -1,11 +1,14 @@
 """Native Chrome/CDP check-in through the official page, with one POST per context."""
 from dataclasses import dataclass, field
 import hashlib
+import http.client
+import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -80,6 +83,44 @@ def _chrome_executable(runtime):
     raise GladosError("Native Chrome/Edge not found; install it or set GLADOS_BROWSER_EXECUTABLE", kind="config")
 
 
+def _cdp_endpoint(port):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/json/version")
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        raw = response.read(16385)
+        if len(raw) > 16384:
+            return None
+        data = json.loads(raw)
+        endpoint = data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
+        if not isinstance(endpoint, str):
+            return None
+        address = urlsplit(endpoint)
+        if (address.scheme != "ws" or address.netloc != f"127.0.0.1:{port}" or address.query or address.fragment or
+                not re.fullmatch(r"/devtools/browser/[a-zA-Z0-9-]+", address.path)):
+            return None
+        return endpoint
+    except (OSError, ValueError, TypeError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+
+
+def _verify_browser_process(browser, pid):
+    client = browser.new_browser_cdp_session()
+    try:
+        data = client.send("SystemInfo.getProcessInfo")
+        processes = data.get("processInfo", []) if isinstance(data, dict) else []
+        if not isinstance(processes, list) or not any(
+                isinstance(item, dict) and item.get("type") == "browser" and type(item.get("id")) is int and
+                item["id"] == pid for item in processes):
+            raise GladosError("Local CDP endpoint does not belong to the launched Chrome process", kind="browser")
+    finally:
+        client.detach()
+
+
 def _checkbox(page):
     for frame in page.frames:
         if urlsplit(frame.url).hostname != TURNSTILE_HOST:
@@ -123,6 +164,7 @@ class NativeBrowser:
         self.origins = tuple(origins)
         self.driver = self.browser = self.process = self.profile = self.lock = None
         self.user_agent = ""
+        self.webdriver = None
 
     def __enter__(self):
         try:
@@ -137,7 +179,11 @@ class NativeBrowser:
             if not self.headless and sys.platform.startswith("linux") and not os.getenv("DISPLAY"):
                 raise GladosError("Headed Chrome on Linux requires a display such as Xvfb", kind="config")
             self.profile = self.paths.new_profile()
-            args = [executable, f"--user-data-dir={self.profile}", "--remote-debugging-port=0",
+            # Port 0 sets Chrome's automation flag; allocate a nonzero loopback port instead.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            args = [executable, f"--user-data-dir={self.profile}", f"--remote-debugging-port={port}",
                     "--remote-debugging-address=127.0.0.1", "--no-first-run", "--no-default-browser-check",
                     "--disable-background-networking", "--disable-component-update", "--disable-sync",
                     f"--crash-dumps-dir={self.paths.crashes}"]
@@ -153,29 +199,31 @@ class NativeBrowser:
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
             deadline = time.monotonic() + 30
-            port_file = project_path(self.profile / "DevToolsActivePort")
             endpoint = None
             while time.monotonic() < deadline and self.process.poll() is None:
-                try:
-                    lines = port_file.read_text(encoding="ascii").splitlines()
-                    if (len(lines) == 2 and lines[0].isdigit() and 1 <= int(lines[0]) <= 65535 and
-                            re.fullmatch(r"/devtools/browser/[a-zA-Z0-9-]+", lines[1])):
-                        endpoint = f"ws://127.0.0.1:{int(lines[0])}{lines[1]}"
-                        break
-                except (OSError, UnicodeError):
-                    pass
+                endpoint = _cdp_endpoint(port)
+                if endpoint:
+                    break
                 time.sleep(0.1)
             if endpoint is None:
                 raise GladosError("Native Chrome failed to expose its local CDP endpoint", kind="browser")
-            self.browser = self.driver.chromium.connect_over_cdp(endpoint, timeout=15000)
+            candidate = self.driver.chromium.connect_over_cdp(endpoint, timeout=15000)
+            # A port race must not connect to or close somebody else's browser.
+            _verify_browser_process(candidate, self.process.pid)
+            self.browser = candidate
             context = self.browser.new_context()
             try:
                 page = context.new_page()
-                self.user_agent = page.evaluate("navigator.userAgent")
+                metadata = page.evaluate("({ua: navigator.userAgent, webdriver: navigator.webdriver})")
+                self.user_agent = metadata.get("ua") if isinstance(metadata, dict) else None
+                self.webdriver = metadata.get("webdriver") if isinstance(metadata, dict) else None
             finally:
                 context.close()
             if not isinstance(self.user_agent, str) or not self.user_agent or any(ord(c) < 32 for c in self.user_agent):
                 raise GladosError("Native Chrome returned an invalid user agent", kind="browser")
+            if type(self.webdriver) is not bool or (not self.headless and self.webdriver):
+                raise GladosError("Headed native Chrome must not report automation mode; no check-in submitted", kind="config")
+            print(f"[GLaDOS] Native Chrome connected; headless={self.headless}, webdriver={self.webdriver}")
             return self
         except Exception as error:
             try:

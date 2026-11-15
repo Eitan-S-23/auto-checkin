@@ -95,6 +95,8 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 
 浏览器先核对登录状态，再打开 `/console/checkin`，等待官网 challenge 和 Turnstile。仅在官网产生有效 nonce、proof 和所需验证参数后允许签到 POST；每个上下文最多提交一次，其他应用写请求被拦截。验证未就绪或挑战过期时不提交；已经提交但响应丢失、断线或格式未知时不切域名、不重新登录、不重放 POST。明确认证/设备拒绝时，可按下一节有限恢复一次。
 
+原生 Chrome 使用非零的本地调试端口，并通过 CDP 核对浏览器 PID。不会使用会设置自动化标志的 `--remote-debugging-port=0`，也不通过脚本篡改 `navigator.webdriver`；有头模式在导入账号 Cookie 前检查该标志为 `false`。CI 的回环模拟测试同样在 Xvfb 有头环境执行，避免只测试 headless 而漏掉此差异。
+
 实际浏览器 UA 同时用于浏览器和辅助 HTTP 查询/邮箱登录，不随机轮换，也不接受账号或面板 `user_agent` 覆盖。账号 `impersonate` 仅影响辅助 `curl_cffi` 请求，不能改变原生浏览器指纹。复制自其他设备的 Cookie 可能仍然 `device-mismatch`；更新 Cookie 或配置邮箱恢复，而不是伪造另一台设备的 UA。
 
 | 配置 | 默认值 | 说明 |

@@ -74,12 +74,18 @@ jobs:
 
       - name: Run offline regression tests
         run: |
-          python -B -m unittest discover -s panels -p 'test_*.py'
+          if [ "$GLADOS_BROWSER_TESTS" = 1 ]
+          then
+            xvfb-run -a --error-file=/dev/stderr python -B -m unittest discover -s panels -p 'test_*.py'
+          else
+            python -B -m unittest discover -s panels -p 'test_*.py'
+          fi
           python -B -m unittest discover -s nodeseek -p 'test_notify.py'
         env:
           GLADOS_BROWSER_CHECKIN: '0'
           GLADOS_VERIFY_ONLY: '0'
           GLADOS_BROWSER_TESTS: ${{ env.GLADOS_BROWSER_REQUIRED == 'true' && '1' || '0' }}
+          GLADOS_BROWSER_TEST_HEADLESS: '0'
 
       - name: Restore encrypted GLaDOS sessions
         if: ${{ env.GLADOS_BROWSER_REQUIRED == 'true' && env.GLADOS_EMAIL_RECOVERY_ENABLED == 'true' && !inputs.diagnose_only }}

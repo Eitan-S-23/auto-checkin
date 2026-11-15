@@ -12,8 +12,8 @@ import unittest
 from unittest import mock
 from urllib.parse import urlsplit
 
-from glados_browser import NativeBrowser, proxy_options
-from glados_common import CHALLENGE_SUFFIX, GladosError
+from glados_browser import NativeBrowser, _cdp_endpoint, _verify_browser_process, proxy_options
+from glados_common import CHALLENGE_SUFFIX, GladosError, bool_setting
 from glados_runtime import RuntimePaths, project_path
 
 
@@ -269,6 +269,42 @@ class BrowserProtocolTestCase(unittest.TestCase):
 
 
 class BrowserLifecycleTestCase(unittest.TestCase):
+    def test_cdp_endpoint_is_bound_to_the_selected_loopback_port(self):
+        port = 41234
+        good = f"ws://127.0.0.1:{port}/devtools/browser/fixture-id"
+        values = (good, "ws://attacker.invalid:41234/devtools/browser/fixture-id",
+                  "ws://127.0.0.1:41235/devtools/browser/fixture-id", good + "?token=private",
+                  "file:///devtools/browser/fixture-id", None)
+        for value in values:
+            connection = mock.Mock()
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = json.dumps({"webSocketDebuggerUrl": value}).encode()
+            with self.subTest(value=value), mock.patch("glados_browser.http.client.HTTPConnection", return_value=connection):
+                self.assertEqual(_cdp_endpoint(port), good if value == good else None)
+            connection.request.assert_called_once_with("GET", "/json/version")
+            connection.close.assert_called_once()
+
+    def test_cdp_endpoint_transport_and_shape_errors_are_bounded(self):
+        for raw in (b"[]", b"not-json", b"x" * 16385):
+            connection = mock.Mock()
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = raw
+            with mock.patch("glados_browser.http.client.HTTPConnection", return_value=connection):
+                self.assertIsNone(_cdp_endpoint(41234))
+        connection.request.side_effect = TimeoutError("private-error")
+        with mock.patch("glados_browser.http.client.HTTPConnection", return_value=connection):
+            self.assertIsNone(_cdp_endpoint(41234))
+
+    def test_cdp_process_identity_is_checked_without_closing_foreign_browser(self):
+        browser = mock.Mock()
+        client = browser.new_browser_cdp_session.return_value
+        client.send.return_value = {"processInfo": [{"type": "browser", "id": 1234}]}
+        _verify_browser_process(browser, 1234)
+        client.detach.assert_called_once()
+        with self.assertRaises(GladosError):
+            _verify_browser_process(browser, 4321)
+        browser.close.assert_not_called()
+
     def test_startup_cleanup_failure_does_not_mask_original_error(self):
         browser = NativeBrowser(runtime=mock.MagicMock(), headless=True)
         failure = GladosError("Native browser unavailable", kind="config")
@@ -372,7 +408,8 @@ class NativeFixtureTestCase(unittest.TestCase):
         if os.name == "posix":
             # Chrome's SingletonSocket cannot fit under the nested fixture TMPDIR.
             runtime.tmp = parent
-        cls.browser = NativeBrowser(runtime=runtime, headless=True, origins=(cls.origin,))
+        cls.browser = NativeBrowser(runtime=runtime, headless=bool_setting("GLADOS_BROWSER_TEST_HEADLESS", True),
+                                    origins=(cls.origin,))
         try:
             cls.browser.__enter__()
         except Exception:
@@ -407,6 +444,10 @@ class NativeFixtureTestCase(unittest.TestCase):
         body = json.loads(self.server.posts[0][2])
         self.assertEqual(body["tsState"], "ok")
         self.assertEqual(body["turnstile"], "fixture-token")
+        self.assertNotIn("--remote-debugging-port=0", self.browser.process.args)
+        self.assertIsInstance(self.browser.webdriver, bool)
+        if not self.browser.headless:
+            self.assertFalse(self.browser.webdriver)
 
     def test_second_context_has_no_first_account_session(self):
         for account in ("alice", "bob"):
