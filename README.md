@@ -16,6 +16,7 @@
 
 - `panels.yml` —— GLaDOS（默认原生 Chrome + Playwright/CDP）+ Railgun（HTTP API）
 - `daily.yml` —— NodeSeek + DeepFlood + linux.sb（浏览器过盾）
+- `panels-tests.yml`: 独立离线回归验证，包含 Xvfb 有头 Chrome 的本地模拟登录和签到测试；不读取账号 Secret，不访问真实签到服务，不恢复或保存真实会话缓存。
 
 GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及排障方法见
 [`panels/README.md`](panels/README.md)。

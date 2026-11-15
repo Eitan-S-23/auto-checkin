@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from glados_browser import NativeBrowser, _cdp_endpoint, _verify_browser_process, proxy_options
 from glados_common import CHALLENGE_SUFFIX, GladosError, bool_setting
 from glados_runtime import RuntimePaths, project_path
+from glados_test_support import native_fixture_runtime
 
 
 class Response:
@@ -404,10 +405,7 @@ class NativeFixtureTestCase(unittest.TestCase):
         cls.origin = "http://127.0.0.1:" + str(cls.server.server_port)
         cls.environment = mock.patch.dict(os.environ, {"CI": "true", "GLADOS_BROWSER_CHANNEL": "chrome"})
         cls.environment.start()
-        runtime = RuntimePaths(cls.directory.name)
-        if os.name == "posix":
-            # Chrome's SingletonSocket cannot fit under the nested fixture TMPDIR.
-            runtime.tmp = parent
+        runtime = native_fixture_runtime(cls.directory.name)
         cls.browser = NativeBrowser(runtime=runtime, headless=bool_setting("GLADOS_BROWSER_TEST_HEADLESS", True),
                                     origins=(cls.origin,))
         try:

@@ -6,14 +6,17 @@ import os
 from pathlib import Path
 import ssl
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import glados_auth
+import glados_test_support
 import test_checkin
 from glados_auth import CookieStore, EmailRecovery, GmailInbox, MailSettings, verification_code
 from glados_common import GladosError, auth_denied, email_address, turnstile_denied
 from glados_runtime import PROJECT_ROOT, RunLock, RuntimePaths, project_path
+from glados_test_support import native_fixture_runtime
 
 checkin = test_checkin.checkin
 
@@ -31,6 +34,24 @@ class RuntimeTestCase(unittest.TestCase):
         for value in (PROJECT_ROOT.parent / "glados-auto-checkin-other", PROJECT_ROOT / "../escape"):
             with self.subTest(value=value), self.assertRaises(GladosError):
                 project_path(value)
+
+    def test_posix_browser_fixture_uses_short_project_tmp(self):
+        with mock.patch.object(glados_test_support, "os", SimpleNamespace(name="posix")):
+            runtime = native_fixture_runtime(self.directory.name)
+        self.assertEqual(runtime.base, self.paths.base)
+        self.assertEqual(runtime.tmp, project_path(".cache/panels/tmp"))
+        self.assertNotEqual(runtime.tmp, runtime.base / "tmp")
+        for name in ("TEMP", "TMP", "TMPDIR"):
+            self.assertEqual(runtime.child_environment()[name], str(runtime.tmp))
+        self.assertEqual(RunLock(runtime).path, runtime.base / "browser.lock")
+        for path in (runtime.home, runtime.cache, runtime.config, runtime.state):
+            path.relative_to(runtime.base)
+
+    def test_windows_browser_fixture_keeps_isolated_tmp(self):
+        with mock.patch.object(glados_test_support, "os", SimpleNamespace(name="nt")):
+            runtime = native_fixture_runtime(self.directory.name)
+        self.assertEqual(runtime.tmp, runtime.base / "tmp")
+        self.assertEqual(runtime.child_environment()["TEMP"], str(runtime.tmp))
 
     def test_driver_environment_is_restored_without_external_outputs(self):
         self.paths.ensure()

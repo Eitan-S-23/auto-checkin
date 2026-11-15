@@ -20,6 +20,7 @@ from glados_common import GladosError
 from glados_manual import (CodeChallenge, GitHubReply, ManualPaths, REPLY_PATH,
                            encrypt_reply, identity)
 from glados_runtime import RuntimePaths, project_path
+from glados_test_support import native_fixture_runtime
 
 
 class CacheKeyTests(unittest.TestCase):
@@ -284,7 +285,7 @@ class NativeLoginFixtureTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(prefix="login-", dir=str(parent)) as directory:
                 origin = "http://127.0.0.1:" + str(server.server_address[1])
-                runtime = RuntimePaths(directory)
+                runtime = native_fixture_runtime(directory)
                 headless = os.getenv("GLADOS_BROWSER_TEST_HEADLESS", "1") != "0"
                 with NativeBrowser(runtime=runtime, headless=headless, origins=(origin,)) as browser:
                     reply = browser.login_with_code(origin, "alice@example.net", lambda: "123456")
