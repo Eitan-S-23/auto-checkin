@@ -23,6 +23,11 @@ from urllib.parse import urlparse
 from urllib.request import Request
 
 from curl_cffi import requests as cffi_requests
+from glados_auth import CookieStore, EmailRecovery, MailSettings
+from glados_browser import NativeBrowser
+from glados_common import (BROWSER_LOCALE, CHALLENGE_DELAY, CHALLENGE_SUFFIX, EMAIL, GladosError, ORIGINS,
+                           auth_denied, bool_setting, email_address, turnstile_denied)
+from glados_runtime import RuntimePaths
 
 # 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
 # 保证从任意工作目录运行脚本都能正确导入
@@ -52,8 +57,8 @@ RECORDED_CHECKIN_MESSAGES = {
 PANELS = [
     {
         "name": "GLaDOS",
-        "origin": "https://glados.cloud",
-        "fallback_origins": ("https://glados.rocks", "https://glados.network"),
+        "origin": ORIGINS[0],
+        "fallback_origins": ORIGINS[1:],
         "token": "glados.cloud",
         "accounts_env": "GLADOS_ACCOUNTS_JSON",
         "ua_env": "GLADOS_USER_AGENT",
@@ -228,8 +233,8 @@ FALLBACK_HTTP_STATUS = {301, 302, 303, 307, 308, 404, 408, 410, 500, 502, 503, 5
 # curl transport errors only; certificate, authentication and configuration errors are excluded.
 RETRYABLE_CURL_CODES = {5, 6, 7, 16, 18, 28, 52, 55, 56, 92}
 MAX_RETRY_WAIT_SECONDS = 60
-CHECKIN_CHALLENGE_DELAY_SECONDS = 2.7
-CHECKIN_CHALLENGE_SUFFIX = ".glados-observe-v1"
+CHECKIN_CHALLENGE_DELAY_SECONDS = CHALLENGE_DELAY
+CHECKIN_CHALLENGE_SUFFIX = CHALLENGE_SUFFIX
 CHECKIN_CHALLENGE_DEFAULT_TTL_MS = 300000
 
 
@@ -310,20 +315,25 @@ class AccountCookieJar(http.cookiejar.CookieJar):
 
 
 class AccountClient:
-    def __init__(self, panel, cookie, user_agent=None, impersonate=None):
+    def __init__(self, panel, cookie, user_agent=None, impersonate=None, *, browser_user_agent=None,
+                 allow_empty_cookie=False):
         self.panel = dict(panel)
         self.origins = tuple(dict.fromkeys((panel["origin"], *panel.get("fallback_origins", ()))))
-        self.user_agent, self.ua_source, self.ua_normalized = resolve_user_agent(panel, user_agent)
+        if browser_user_agent is None:
+            self.user_agent, self.ua_source, self.ua_normalized = resolve_user_agent(panel, user_agent)
+        else:
+            self.user_agent = normalize_user_agent(browser_user_agent)
+            self.ua_source, self.ua_normalized = "browser", False
         self.proxy_url = configured_proxy(panel)
         self.checkin_outcome = None
-        self.initial_cookies = cookie_pairs(cookie)
+        self.initial_cookies = {} if allow_empty_cookie and not cookie else cookie_pairs(cookie)
         self.profile, self.profile_exact = browser_profile(self.user_agent, impersonate)
         self.jars = {}
         self.required_sessions = {name for name in self.initial_cookies if name.endswith(":sess")}
         self.jar = self.jar_for_origin(panel["origin"])
         self.cookie_updated = False
         try:
-            if self.proxy_url:
+            if self.proxy_url or browser_user_agent is not None:
                 # NO_PROXY must not bypass a proxy selected explicitly for this panel.
                 self.session = create_retry_session(self.profile, trust_env=False)
             else:
@@ -364,7 +374,10 @@ class AccountClient:
         active = dict(part.strip().partition("=")[::2] for part in cookie.split(";") if "=" in part)
         if any(not active.get(name) or not active.get(name + ".sig") for name in self.required_sessions):
             raise PanelRequestError("服务端清除了登录会话，请重新登录，不继续请求", kind="auth")
-        return generate_headers(cookie, self.panel, self.user_agent)
+        headers = generate_headers(cookie, self.panel, self.user_agent)
+        if self.ua_source == "browser":
+            headers["Accept-Language"] = BROWSER_LOCALE
+        return headers
 
     def merge_cookies(self, response, path):
         headers = response.headers
@@ -384,6 +397,44 @@ class AccountClient:
         after = {(c.domain, c.path, c.name, c.value, c.expires) for c in self.jar}
         self.cookie_updated = self.cookie_updated or before != after
         self.headers(path)
+
+    def cookie_values(self):
+        request = Request(self.panel["origin"] + "/api/user/checkin")
+        self.jar.add_cookie_header(request)
+        raw = request.get_header("Cookie", "")
+        return cookie_pairs(raw) if raw else {}
+
+    def replace_cookie_values(self, values):
+        if not isinstance(values, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items()):
+            raise PanelRequestError("会话 Cookie 结构无效", kind="config")
+        raw = "; ".join(f"{name}={value}" for name, value in values.items())
+        validated = cookie_pairs(raw) if raw else {}
+        before = self.cookie_values()
+        self.jar.clear()
+        host = urlparse(self.panel["origin"]).hostname
+        for name, value in validated.items():
+            self.jar.set_cookie(http.cookiejar.Cookie(0, name, value, None, False, host, False, False,
+                "/", True, self.panel["origin"].startswith("https://"), None, True, None, None, {}, False))
+        self.required_sessions = {name for name in validated if name.endswith(":sess")}
+        self.cookie_updated = self.cookie_updated or before != validated
+
+    def browser_cookies(self):
+        return [{"name": name, "value": value, "url": self.panel["origin"] + "/",
+                 "secure": self.panel["origin"].startswith("https://"),
+                 "httpOnly": bool(re.fullmatch(r"[A-Za-z0-9_.-]+:sess(?:\.sig)?", name))}
+                for name, value in self.cookie_values().items()]
+
+    def accept_browser_cookies(self, cookies):
+        host = urlparse(self.panel["origin"]).hostname
+        values = {}
+        for cookie in cookies:
+            if not isinstance(cookie, dict) or cookie.get("domain", "").lstrip(".") != host:
+                continue
+            name, value = cookie.get("name"), cookie.get("value")
+            if not isinstance(name, str) or not isinstance(value, str) or name in values:
+                raise PanelRequestError("浏览器会话 Cookie 无效或重复", kind="response")
+            values[name] = value
+        self.replace_cookie_values(values)
 
 
 @dataclass(frozen=True)
@@ -479,6 +530,11 @@ def request_json_once(panel, cookie, path, method, payload, client=None):
             raise PanelRequestError("响应 JSON 结构异常，状态未知", kind="response", fallback_allowed=method == "GET")
         message = data.get("message", "")
         message = message.lower() if isinstance(message, str) else ""
+        if panel.get("name") == "GLaDOS" and turnstile_denied(data):
+            raise PanelRequestError(
+                f"Cloudflare 验证被拒绝，不重试 [code={safe_business_code(data.get('code'))}, reason=turnstile]",
+                kind="turnstile",
+            )
         if data.get("reason") == "device-mismatch" or "automated check-in detected" in message:
             raise PanelRequestError("设备校验被拒绝，请核对 Cookie 和 User-Agent，不重试", kind="device")
         if data.get("code") in (-2, "-2") or any(marker in message for marker in (
@@ -615,7 +671,7 @@ def safe_business_code(value):
 def safe_checkin_reason(value):
     if value is None or value == "":
         return "missing"
-    allowed = {"device-mismatch", "observation", "observation-period", "already-checked-in", "low-reward"}
+    allowed = {"device-mismatch", "turnstile", "observation", "observation-period", "already-checked-in", "low-reward"}
     return value if isinstance(value, str) and value in allowed else "other"
 
 
@@ -633,6 +689,39 @@ def low_reward_warning(panel, outcome):
     return ""
 
 
+def parse_checkin_reply(panel, data, client=None):
+    if not isinstance(data, dict):
+        raise PanelRequestError("签到响应格式无效，状态未知", kind="response")
+    if client is not None:
+        client.checkin_outcome = None
+    if panel.get("name") == "GLaDOS" and turnstile_denied(data):
+        raise PanelRequestError(
+            f"Cloudflare 验证被拒绝，不重试 [code={safe_business_code(data.get('code'))}, reason=turnstile]",
+            kind="turnstile",
+        )
+    msg = data.get("message", "")
+    code = data.get("code")
+    normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?[.!]?", msg.strip(), re.I)
+    free_account = panel.get("name") == "Railgun" and isinstance(msg, str) and re.fullmatch(
+        r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?\s+\(Free account - upgrade for more!\)", msg.strip(), re.I,
+    )
+    repeated = isinstance(msg, str) and msg in RECORDED_CHECKIN_MESSAGES
+    if isinstance(code, bool) or not ((code in (None, 0, "0") and normal) or (code in (0, "0") and free_account) or
+                                    (code in (None, 0, "0", 1, "1") and repeated)):
+        raise PanelRequestError(
+            "签到接口未返回明确成功或已签到结果，请核对官网 "
+            f"[code={safe_business_code(code)}, reason={safe_checkin_reason(data.get('reason'))}]", kind="business",
+        )
+    category = "free_reward" if free_account else "reward" if normal else (
+        "observation" if msg.startswith("Today's observation logged.") else "repeated")
+    if client is not None:
+        client.checkin_outcome = CheckinOutcome(
+            category, (normal or free_account).group(1) if normal or free_account else None,
+            safe_business_code(code), safe_checkin_reason(data.get("reason")), client.panel["origin"],
+        )
+    return translate_message(msg) + ("（免费账号奖励）" if free_account else "")
+
+
 def sign(panel, cookie, client=None):
     try:
         if client is not None:
@@ -641,27 +730,7 @@ def sign(panel, cookie, client=None):
         if panel.get("checkin_challenge"):
             kwargs["payload_factory"] = lambda active: prepare_checkin_payload(panel, cookie, active)
         data = request_json(panel, cookie, "/api/user/checkin", "POST", {"token": panel["token"]}, **kwargs)
-        msg = data.get("message", "")
-        code = data.get("code")
-        normal = isinstance(msg, str) and re.fullmatch(r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?[.!]?", msg.strip(), re.I)
-        free_account = panel.get("name") == "Railgun" and isinstance(msg, str) and re.fullmatch(
-            r"Checkin!\s*Got\s+(\d+(?:\.\d+)?)\s+Points?\s+\(Free account - upgrade for more!\)", msg.strip(), re.I,
-        )
-        repeated = isinstance(msg, str) and msg in RECORDED_CHECKIN_MESSAGES
-        if isinstance(code, bool) or not ((code in (None, 0, "0") and normal) or (code in (0, "0") and free_account) or
-                (code in (None, 0, "0", 1, "1") and repeated)):
-            raise PanelRequestError(
-                "签到接口未返回明确成功或已签到结果，请核对官网 "
-                f"[code={safe_business_code(code)}, reason={safe_checkin_reason(data.get('reason'))}]", kind="business",
-            )
-        category = "free_reward" if free_account else "reward" if normal else (
-            "observation" if msg.startswith("Today's observation logged.") else "repeated")
-        if client is not None:
-            client.checkin_outcome = CheckinOutcome(
-                category, (normal or free_account).group(1) if normal or free_account else None,
-                safe_business_code(code), safe_checkin_reason(data.get("reason")), client.panel["origin"],
-            )
-        return translate_message(msg) + ("（免费账号奖励）" if free_account else "")
+        return parse_checkin_reply(panel, data, client)
     except PanelRequestError as error:
         if client is not None:
             raise
@@ -710,15 +779,89 @@ def process_account(panel, account, diagnostic=False):
                          client.checkin_outcome if client else None)
 
 
-def checkin_panel(panel, diagnostic=False):
+def process_browser_account(panel, account, browser, *, recovery=None, store=None, verify_only=False):
+    if not isinstance(account, dict):
+        return AccountResult(False, "账号配置项必须是 JSON 对象")
+    cookie = account.get("cookie", "")
+    if not isinstance(cookie, str) or any(account.get(field) is not None and not isinstance(account[field], str)
+                                          for field in ("user_agent", "impersonate")):
+        return AccountResult(False, "Cookie、user_agent 和 impersonate 必须为字符串")
+    message, days, traffic, points = "未执行签到", "未获取", "未获取", "未获取"
+    client = None
+    try:
+        label = account.get("email", "")
+        expected_email = email_address(label) if recovery is not None else (
+            label.strip().lower() if isinstance(label, str) and EMAIL.fullmatch(label.strip()) else None)
+        if store is not None and expected_email:
+            cached = store.get(expected_email, panel["origin"])
+            if cached:
+                cookie = "; ".join(f"{name}={value}" for name, value in cached.items())
+        if not cookie and (recovery is None or verify_only):
+            return AccountResult(False, "无可用 Cookie；只读验证不自动登录，请先建立会话")
+        with AccountClient(panel, cookie, account.get("user_agent"), account.get("impersonate"),
+                           browser_user_agent=browser.user_agent,
+                           allow_empty_cookie=recovery is not None and not verify_only) as client:
+            print(f"[GLaDOS] UA 来源=原生浏览器；网络={'显式代理' if client.proxy_url else '直连（不使用环境代理）'}")
+            logged_in = recovery.prepare(client, expected_email) if recovery is not None and not verify_only else False
+            tried = set()
+            while True:
+                tried.add(client.panel["origin"])
+                try:
+                    reply = browser.run(client.panel["origin"], client.browser_cookies(),
+                                        expected_email=expected_email, verify_only=verify_only)
+                    break
+                except GladosError as error:
+                    if error.fallback and recovery is None and client.switch_origin(tried):
+                        print(f"[GLaDOS] 浏览器提交前接口不可用，改用 {client.panel['origin']}")
+                        continue
+                    raise
+            if reply.cookies and not auth_denied(reply.payload):
+                client.accept_browser_cookies(reply.cookies)
+            if auth_denied(reply.payload):
+                if recovery is None or verify_only or logged_in:
+                    raise PanelRequestError("登录会话失效或设备不一致，请更新 Cookie 或配置邮箱恢复", kind="auth")
+                recovery.login(client, expected_email)
+                reply = browser.run(client.panel["origin"], client.browser_cookies(), expected_email=expected_email)
+                if reply.cookies and not auth_denied(reply.payload):
+                    client.accept_browser_cookies(reply.cookies)
+                if auth_denied(reply.payload):
+                    raise PanelRequestError("本轮邮箱登录后仍被拒绝，不再次发送验证码或签到", kind="auth")
+            if verify_only:
+                ready = reply.payload.get("ready") is True and reply.payload.get("challenge") is True
+                if not ready:
+                    raise PanelRequestError("浏览器 Turnstile 验证未就绪，未提交签到", kind="turnstile")
+                message = "浏览器验证就绪（仅验证，不签到、不发验证码、不写会话缓存）"
+            else:
+                message = parse_checkin_reply(client.panel, reply.payload, client)
+                if store is not None and expected_email:
+                    store.put(expected_email, client.panel["origin"], client.cookie_values())
+            days, traffic = check_account_status(client.panel, cookie, client=client)
+            if not verify_only:
+                points = fetch_points(client.panel, cookie, client=client)
+        return AccountResult(True, message, days, traffic, points, client.cookie_updated, client.checkin_outcome)
+    except (PanelRequestError, GladosError) as error:
+        failure = str(error)
+    except Exception as error:
+        failure = f"浏览器账号处理异常（{type(error).__name__}），不自动重放签到"
+    if message != "未执行签到":
+        failure = message + "；后续查询失败：" + failure
+    return AccountResult(False, failure, days, traffic, points, bool(client and client.cookie_updated),
+                         client.checkin_outcome if client else None)
+
+
+def checkin_panel(panel, diagnostic=False, verify_only=False):
     """返回含实际成功状态的面板结果；未启用时返回 None。"""
     raw = os.getenv(panel["accounts_env"], "").strip()
     if not raw:
         print(f"[{panel['name']}] 未配置 {panel['accounts_env']}，跳过")
         return None
 
+    if verify_only and panel.get("name") != "GLaDOS":
+        print(f"[{panel['name']}] 浏览器验证模式仅检查 GLaDOS，跳过")
+        return None
+
     beijing_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-    action = "只读诊断" if diagnostic else "自动签到"
+    action = "浏览器验证诊断" if verify_only else "只读诊断" if diagnostic else "自动签到"
     title = f"【{panel['name']} {action}】{beijing_now.strftime('%m-%d %H:%M')}"
 
     try:
@@ -731,10 +874,31 @@ def checkin_panel(panel, diagnostic=False):
         print(f"[{panel['name']}] 账号列表为空，跳过")
         return None
 
+    try:
+        enabled = panel.get("name") == "GLaDOS" and not diagnostic and (
+            verify_only or bool_setting("GLADOS_BROWSER_CHECKIN", False))
+        if not enabled:
+            return collect_accounts(panel, accounts, title, diagnostic)
+        paths = RuntimePaths()
+        settings = None if verify_only else MailSettings.from_environment()
+        key = settings.key if settings else (os.getenv("GLADOS_COOKIE_STORE_KEY", "").strip() if verify_only else "")
+        store = CookieStore(key, paths) if key else None
+        recovery = EmailRecovery(settings, store) if settings else None
+        with NativeBrowser(proxy=configured_proxy(panel), runtime=paths) as browser:
+            return collect_accounts(panel, accounts, title, False, browser=browser, recovery=recovery,
+                                    store=store, verify_only=verify_only)
+    except (PanelRequestError, GladosError) as error:
+        print(f"[GLaDOS] 浏览器任务未完成：{error}")
+        return PanelResult(title, f"浏览器任务未完成：{error}", False)
+
+
+def collect_accounts(panel, accounts, title, diagnostic=False, *, browser=None, recovery=None, store=None,
+                     verify_only=False):
     msg_list, all_success = [], True
     for idx, acc in enumerate(accounts, 1):
         email = str(acc.get("email", f"账号{idx}")) if isinstance(acc, dict) else f"账号{idx}"
-        result = process_account(panel, acc, diagnostic=diagnostic)
+        result = process_account(panel, acc, diagnostic=diagnostic) if browser is None else process_browser_account(
+            panel, acc, browser, recovery=recovery, store=store, verify_only=verify_only)
         all_success = all_success and result.success
         status = "成功" if result.success else "失败"
         print(f"[{panel['name']}] 账号{idx}: {status}；{result.message}")
@@ -757,8 +921,12 @@ def checkin_panel(panel, diagnostic=False):
         msg_list.append(f"🎯 积分：{result.points}")
         msg_list.append(f"📶 流量已用：{result.traffic} GB")
         if result.cookie_updated:
-            msg_list.append("会话 Cookie 有变化，仅用于本次运行，未写回 Secret")
-            print(f"[{panel['name']}] 账号{idx}: 会话 Cookie 有变化，仅保存在内存中")
+            if recovery is not None:
+                msg_list.append("会话 Cookie 有变化；邮箱模式仅使用项目内加密缓存，不写回 Secret")
+                print(f"[{panel['name']}] 账号{idx}: 邮箱会话使用项目内加密缓存，不写回 Secret")
+            else:
+                msg_list.append("会话 Cookie 有变化，仅用于本次运行，未写回 Secret")
+                print(f"[{panel['name']}] 账号{idx}: 会话 Cookie 有变化，仅保存在内存中")
         msg_list.append("-" * 20)
         if idx < len(accounts):
             time.sleep(random.randint(2, 4))
@@ -774,17 +942,21 @@ def diagnostic_mode():
     raise PanelRequestError("PANEL_DIAGNOSTIC_ONLY 格式无效，未执行任务", kind="config")
 
 
-def run(diagnostic=None):
+def run(diagnostic=None, verify_only=None):
     try:
         diagnostic = diagnostic_mode() if diagnostic is None else diagnostic
-    except PanelRequestError as error:
+        verify_only = bool_setting("GLADOS_VERIFY_ONLY", False) if verify_only is None else verify_only
+        if diagnostic and verify_only:
+            raise PanelRequestError("只读状态诊断与浏览器验证不能同时启用", kind="config")
+    except (PanelRequestError, GladosError) as error:
         print(str(error))
         return 1
     processed = 0
     failed = False
     for panel in PANELS:
         try:
-            result = checkin_panel(panel, diagnostic=diagnostic)
+            result = checkin_panel(panel, diagnostic=diagnostic, verify_only=True) if verify_only else checkin_panel(
+                panel, diagnostic=diagnostic)
         except Exception as error:
             print(f"[{panel['name']}] 任务处理异常（{type(error).__name__}）")
             failed = True
@@ -793,7 +965,7 @@ def run(diagnostic=None):
             continue
         processed += 1
         failed = failed or not result.success
-        if not diagnostic:
+        if not diagnostic and not verify_only:
             try:
                 notifications = notify.send(result.title, result.content, scope=panel["notify_scope"])
                 if isinstance(notifications, dict) and any(value not in ("sent", "skipped") for value in notifications.values()):
@@ -808,10 +980,13 @@ def run(diagnostic=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="GLaDOS / Railgun 签到或只读诊断")
-    parser.add_argument("--diagnose", action="store_true", help="仅查询账号状态，不签到、不推送")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--diagnose", action="store_true", help="仅查询账号状态，不签到、不推送")
+    modes.add_argument("--verify-browser", action="store_true", help="仅检查 GLaDOS 浏览器验证，不签到、不推送、不登录")
     args = parser.parse_args(argv)
     print("===== 开始任务 =====")
-    result = run(diagnostic=True if args.diagnose else None)
+    kwargs = {"verify_only": True} if args.verify_browser else {}
+    result = run(diagnostic=True if args.diagnose else None, **kwargs)
     print("===== 执行完成 =====")
     return result
 

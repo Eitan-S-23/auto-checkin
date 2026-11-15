@@ -12,7 +12,7 @@
 | Railgun | `https://railgun.info` | `RAILGUN_ACCOUNTS_JSON` | `RAILGUN_USER_AGENT` |
 
 - 账号配置和推送密钥放在 **Secrets → New repository secret**，不要放进公开 Variables、代码或 Issue。
-- 面板 User-Agent 可放在 **Variables → New repository variable**，或同名 Secret；工作流优先读取非空 Variable，未设置时回退同名 Secret。账号级 `user_agent` 仍优先于面板配置。
+- 旧 HTTP 方式的 User-Agent 可放在 **Variables → New repository variable**，或同名 Secret；工作流优先读取非空 Variable，未设置时回退同名 Secret。账号级 `user_agent` 仍优先于面板配置。GLaDOS 浏览器方式使用原生浏览器实际 UA，不使用这些 UA 覆盖。
 - 只使用一个站点时，仅配置该站点的账号 Secret，另一个留空。
 - Fork 用户先同步仓库代码，再填写自己的配置；同步代码不会同步或更新 Secrets。
 
@@ -22,7 +22,7 @@
 2. 按 F12 打开开发者工具，切换到 **Network / 网络**，刷新控制台页面。
 3. 找到对应站点的 `/api/user/status` 请求。先查看响应 JSON，确认有账号 `data`；仅有 HTTP 200 不代表登录成功。
 4. 在 **Request Headers / 请求标头** 中复制 `Cookie` 的完整值，包括所有字段名、等号、值和分号。脚本也兼容带 `Cookie:` 前缀的整行。
-5. 从同一条请求复制完整的 `User-Agent`，填入该站点的 UA Variable，或对应账号的可选 `user_agent` 字段。
+5. 若使用 Railgun 或 GLaDOS 旧 HTTP 方式，从同一条请求复制完整的 `User-Agent`，填入该站点的 UA Variable，或对应账号的可选 `user_agent` 字段。GLaDOS 浏览器模式无需手填 UA，但不同设备登录的旧 Cookie 仍可能被拒绝。
 
 GLaDOS 当前常见的签名会话结构如下，值只是占位符：
 
@@ -81,13 +81,60 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 ]
 ```
 
-`email` 只是通知中显示的账号标识，不参与服务端认证；可以使用便于识别的账号名称，省略时显示“账号1”等默认标识。`cookie` 才是登录凭据，必须是字符串。
+未启用邮箱恢复时，`email` 可作为通知显示标识；浏览器模式中若填写了有效邮箱，还会核对状态接口返回的账号邮箱，防止用错会话。启用邮箱恢复时，必须填写该 GLaDOS 账号的真实登录邮箱，它参与登录和缓存绑定。`cookie` 必须是字符串；未启用恢复时不能留空，启用恢复后可填 `""` 以在首次运行登录。
 
 推荐直接粘贴标准 JSON 数组，不加 Markdown 围栏、不额外包一层引号。JSON 字符串内的双引号和反斜杠需要转义；字符串值内不要插入实际换行。外层数组可以正常缩进换行。脚本虽兼容双重 JSON 编码，首次配置无需使用它。
 
-## 4. User-Agent 和通知
+## 4. 浏览器、User-Agent 和通知
 
-**原有 `email` + `cookie` 配置继续有效，不需要批量重配。** 默认使用固定 Windows Chrome 124 UA，与默认 `chrome124` 传输预设一致。不自动改写已配置 UA 的浏览器平台或版本，只移除复制时附带的 `User-Agent:` 前缀、成对外层引号及两端空格。控制字符、无法发送的字符、空值包装或重复包装会在创建 Session 前拒绝，错误不输出原始值。
+### GLaDOS 原生浏览器方式
+
+`panels.yml` 默认启用 `GLADOS_BROWSER_CHECKIN=1`。使用运行器已安装的 Google Chrome，通过 Playwright/CDP 连接，Linux 有头模式在 Xvfb 下运行；不默认下载另一套浏览器。每个账号使用独立的浏览器上下文，同一轮仍共用 Chrome 进程和出口网络。Railgun、NodeSeek、DeepFlood、linux.sb 和通知实现不变。
+
+这次改造参考 [Ingress007/GLaDOS-Auto-Checkin 的固定版本](https://github.com/Ingress007/GLaDOS-Auto-Checkin/tree/bdb7ce6cb41f6d74f7e5f503fb947cc3e411f967) 的原生 Chrome、官方验证和邮箱会话恢复思路，使用本项目自己的实现，未整文件复制其代码。参考仓库[2026-11-15 的运行](https://github.com/Ingress007/GLaDOS-Auto-Checkin/actions/runs/43613098333)有首次奖励，但不代表本仓库账号已经恢复，也不保证未来持续通过验证。
+
+浏览器先核对登录状态，再打开 `/console/checkin`，等待官网 challenge 和 Turnstile。仅在官网产生有效 nonce、proof 和所需验证参数后允许签到 POST；每个上下文最多提交一次，其他应用写请求被拦截。验证未就绪或挑战过期时不提交；已经提交但响应丢失、断线或格式未知时不切域名、不重新登录、不重放 POST。明确认证/设备拒绝时，可按下一节有限恢复一次。
+
+实际浏览器 UA 同时用于浏览器和辅助 HTTP 查询/邮箱登录，不随机轮换，也不接受账号或面板 `user_agent` 覆盖。账号 `impersonate` 仅影响辅助 `curl_cffi` 请求，不能改变原生浏览器指纹。复制自其他设备的 Cookie 可能仍然 `device-mismatch`；更新 Cookie 或配置邮箱恢复，而不是伪造另一台设备的 UA。
+
+| 配置 | 默认值 | 说明 |
+|---|---|---|
+| Variable `GLADOS_BROWSER_CHECKIN` | 工作流 `1`；本地未设置时 `0` | `1` / `true` 启用，`0` / `false` 切回旧 HTTP 方式。 |
+| Variable `GLADOS_BROWSER_TIMEOUT_SECONDS` | `120` | 验证/请求等待时间，整数 `10` 到 `300` 秒。 |
+| 本地环境 `GLADOS_BROWSER_HEADLESS` | `false` | 工作流使用 Xvfb 有头模式；本地可设 `true`，但不保证风控效果相同。 |
+| 本地环境 `GLADOS_BROWSER_CHANNEL` | `chrome` | 可选 `chrome`、`msedge`、`chromium`；后者需自行安装到项目内浏览器目录。 |
+| 本地环境 `GLADOS_BROWSER_EXECUTABLE` | 自动查找 | 可指定已安装的 Chrome/Edge 可执行文件，只作为程序输入。 |
+| 本地环境 `GLADOS_RUNTIME_DIR` | `.cache/panels` | 必须解析到本项目内，项目外路径或指向项目外的链接会被拒绝。 |
+
+### 可选 Gmail 恢复和加密缓存
+
+沿用原 `GLADOS_ACCOUNTS_JSON`，额外配置三个 **Secrets**，必须一起填写：
+
+| Secret | 用途 |
+|---|---|
+| `GLADOS_GMAIL_ADDRESS` | 接收各账号验证码的统一 Gmail 邮箱。 |
+| `GLADOS_GMAIL_APP_PASSWORD` | 开启两步验证后生成的 Gmail 应用专用密码，用于 IMAP；不要填写主登录密码。 |
+| `GLADOS_COOKIE_STORE_KEY` | 固定 Fernet 密钥，用于加密会话缓存；保持不变才能复用旧缓存。 |
+
+可以使用已安装的 `cryptography` 在本地生成 Fernet 密钥，将结果直接存入 Secret，不提交代码或粘贴到 Issue：
+
+```shell
+python -B -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode('ascii'))"
+```
+
+将各 GLaDOS 登录邮箱收到的验证码邮件自动转发到该 Gmail，保留原收件人 `To`、`X-Original-To` 或 `X-Gm-Original-To`。脚本核对目标账号、发送者、邮件时间和新 UID，拒绝旧验证码、其他账号或多个不同验证码，不猜测。默认允许发送者域名为 `glados.network`、`glados.cloud`、`glados.one`；如官方发送地址改变，可通过 Variable `GLADOS_GMAIL_SENDERS` 配置域名或完整地址，以逗号分隔。不要配置任意发送者。
+
+Variable `GLADOS_GMAIL_WAIT_SECONDS` 默认 `120`，范围 `10` 到 `600` 秒。Gmail 通过 `imap.gmail.com:993` 直连，只读打开 INBOX，使用 `BODY.PEEK[]`，不删除或主动标记邮件已读；`GLADOS_PROXY_URL` 不代理 IMAP。
+
+每轮先检查缓存/配置 Cookie 的账号身份。完整有效会话不发验证码；无会话或明确登录失效/设备拒绝时最多登录一次。本轮已登录后仍拒绝则停止。Turnstile 拒绝、网络错误、HTML、身份不符和签到提交后结果未知都不触发额外登录。登录 API 如果要求额外人工验证，脚本停止，不反复请求验证码。
+
+会话按真实邮箱和来源域名绑定，原子写入 `.cache/panels/sessions.enc`，仅此加密文件通过 Actions cache 恢复/保存；密钥只来自 Secret。运行器缓存可能被淘汰，旧密钥无法解密时不会盲用缓存。浏览器明文临时配置在结束时清理，整个 `.cache/` 已忽略，不写回账号 Secret。换密钥后需重新建立有效会话。
+
+未配置这三个 Secrets 时，仍可用有效 Cookie 签到，但不自动登录或跨次缓存会话；不应将此配置缺失误报为 Cookie 自然到期。
+
+### 旧 HTTP 方式的 User-Agent
+
+**以下 UA 规则仅适用于 Railgun 和 GLaDOS 旧 HTTP 方式。** 默认使用固定 Windows Chrome 124 UA，与默认 `chrome124` 传输预设一致。不自动改写已配置 UA 的浏览器平台或版本，只移除复制时附带的 `User-Agent:` 前缀、成对外层引号及两端空格。控制字符、无法发送的字符、空值包装或重复包装会在创建 Session 前拒绝，错误不输出原始值。
 
 UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT` > 默认值。若登录浏览器在 macOS、Linux、手机或使用其他浏览器，请使用同一浏览器请求里的 UA。不同账号可以使用不同 UA，但不随机轮换。
 
@@ -119,7 +166,9 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 请求显式携带 `Accept-Language` 和 `Sec-Fetch-Dest` / `Sec-Fetch-Mode` / `Sec-Fetch-Site`。日志只展示 UA 来源（账号、面板或默认）、传输预设、是否规范化，以及使用默认网络还是显式代理，不输出完整 UA。
 
-每个账号拥有独立的 HTTP Session 和 CookieJar，同账号的签到、状态、积分和重试复用该 Session，处理结束后关闭。**这不是独立真实浏览器，也不提供不同出口 IP**；GitHub Actions 上的多个账号通常仍共用运行器网络。不要把随机 UA 或 Session 隔离视为能消除风控。
+旧 HTTP 方式的每个账号拥有独立的 HTTP Session 和 CookieJar，同账号的签到、状态、积分和重试复用该 Session，处理结束后关闭。**HTTP Session 不是独立真实浏览器，也不提供不同出口 IP**；GitHub Actions 上的多个账号通常仍共用运行器网络。不要把随机 UA 或 Session 隔离视为能消除风控。
+
+### 通知
 
 通知配置都是可选的。完整渠道列表见[根目录 README](../README.md) 的“通知渠道”章节，常见配置如下：
 
@@ -137,15 +186,23 @@ UA 优先级为：账号 `user_agent` > 面板 `GLADOS_USER_AGENT` / `RAILGUN_US
 
 ## 5. 运行和验收
 
-1. 打开 **Actions → panels-checkin → Run workflow**，选择自己仓库的主分支运行。首次排查建议勾选 `diagnose_only`。
+1. 打开 **Actions → panels-checkin → Run workflow**，选择自己仓库的主分支运行。首次排查可勾选 `diagnose_only` 检查状态，或勾选 `verify_only` 检查浏览器验证，不要同时选择。
 2. 查看 `Run checkin` 步骤和通知中的实际结果，分别确认两个站点是否被跳过或执行。
 3. 核对官网的签到记录、积分和剩余天数，不要只看工作流的绿色成功标记。
 
 默认运行会实际发送签到请求，并向已配置渠道推送。勾选 `diagnose_only` 后只 GET `/api/user/status`，不签到、不查询积分、不推送、不修改 Secrets；只读诊断成功也不保证签到设备校验通过。
 
+如 SSH 可以推送但工作流 API 认证不可用，可修改 `.github/panels-checkin.trigger`，用包含 `[panels-checkin]` 的提交说明推送到 `main`。只有这个明确标记的触发文件变更才执行正式签到；普通代码推送不会签到。该入口同样使用已有账号 Secrets 和并发限制，不是只读诊断。
+
+`verify_only` 仅检查 GLaDOS：核对已有会话和邮箱、加载官方 challenge、等待 Turnstile 就绪并查询状态；不点击签到按钮、不发送应用签到/登录 POST、不访问邮箱、不保存会话缓存、不推送，并跳过 Railgun。官网验证自身的 Cloudflare 通信仍会发生。它需要已有有效 Cookie 或可解密缓存，验证就绪也不是签到入账证明。与 `diagnose_only` 同时启用会直接失败，不执行账号任务。
+
 任一账号的签到或查询失败、配置异常或已配置通知渠道失败都会使脚本返回非零状态，工作流标红；其他账号和站点仍继续处理。未配置站点或空数组不算失败。日志只展示账号序号和安全错误分类，不输出邮箱、Cookie、原始服务端错误文本或通知密钥；通知仍使用配置中的账号标识。
 
-定时为 UTC 的 `0 */8 * * *`，对应北京时间约 00:00、08:00、16:00；GitHub 调度可能延迟，并非保证精确到点。本仓库使用同一 `panels-checkin` 并发组，跨分支的定时、手动和只读诊断运行也互斥，不取消正在运行的任务；其他仓库不共享该限制，GitHub 并发组也不保证每个排队任务都被保留或按顺序执行。单次任务上限 20 分钟。每次运行从 `panels/requirements.txt` 安装固定版本的关键依赖，并先执行不使用真实账号的离线回归测试，测试失败时不执行签到或诊断。
+定时为 UTC 的 `0 */8 * * *`，对应北京时间约 00:00、08:00、16:00；GitHub 调度可能延迟，并非保证精确到点。本仓库使用同一 `panels-checkin` 并发组，跨分支的定时、手动和诊断运行也互斥，不取消正在运行的任务；其他仓库不共享该限制，GitHub 并发组也不保证每个排队任务都被保留或按顺序执行。单次任务上限 30 分钟。每次运行从 `panels/requirements.txt` 安装固定版本依赖到 `.cache/panels/deps`，先执行不使用真实账号的离线回归测试；需要浏览器的模式还执行本地模拟站点的 Chrome 测试，测试失败时不执行账号任务。
+
+浏览器配置、临时目录、子进程 HOME/应用数据、依赖和缓存均指向项目内 `.cache/panels/`。浏览器任务还使用独占 `browser.lock`；若异常终止遗留锁文件，应先确认没有仍在运行的 Chrome/签到进程，再处理项目内旧锁，不要自动覆盖或删除其他运行的锁。
+
+Windows 子进程的 `USERPROFILE`、`LOCALAPPDATA`、`APPDATA` 使用一致的标准 `AppData/Local`、`AppData/Roaming` 布局；只改环境变量而没有对应目录会使 Windows known-folder 查询失败，进而被 Chrome 的默认配置目录保护拒绝 CDP。该约束有本机回归测试，不需要借用个人浏览器目录。
 
 删除或清空某站的账号 Secret 可以停用该站；`[]` 也会按空账号列表跳过。禁用整个 `panels-checkin` 工作流会同时停止两个站点。
 
@@ -166,9 +223,11 @@ GLaDOS 的 `reward` 不超过阈值时，日志和通知增加“低奖励提醒
 
 ### GLaDOS 可选代理 / WARP 入口
 
-默认不启用显式代理，保留原运行器网络和环境代理行为。只有在 Secret `GLADOS_PROXY_URL` 非空时，GLaDOS 的 challenge、签到、状态、积分、重试及备用域名请求才统一使用该代理；所有 GLaDOS 账号共用同一入口，不提供每账号独立出口。Railgun、其他签到站点和通知渠道不受该配置影响。
+默认不启用显式代理。浏览器模式及其辅助 HTTP 请求明确直连，不继承环境代理；旧 HTTP 方式保留原环境代理行为。Secret `GLADOS_PROXY_URL` 非空时，GLaDOS 浏览器、登录 API、challenge、签到、状态、积分及备用域名请求统一使用该代理；所有 GLaDOS 账号共用同一入口，不提供每账号独立出口。Railgun、其他签到站点、Gmail IMAP 和通知渠道不受该配置影响。
 
 支持 `http://`、`https://`、`socks5://`、`socks5h://`，必须有主机名和有效端口（如果指定），不能含原始空白、业务路径、查询参数或片段。需要代理认证时，用户名和密码中的特殊字符应做 URL 百分号编码，并将完整地址保存为 Secret，不要写进公开 Variable、日志或 Issue。无效配置在创建 Session 前失败，错误及诊断不输出代理地址或凭据。
+
+Chrome 不支持这里的 SOCKS 用户名/密码认证：浏览器模式遇到带认证 SOCKS 地址会明确失败，不静默切回直连。HTTP/HTTPS 认证信息通过浏览器上下文配置传递，不放到 Chrome 启动命令；`socks5h` 在浏览器侧使用 SOCKS5。
 
 例如，**实际运行器内已经存在**监听 `127.0.0.1:40000` 的 SOCKS5 代理时，才可使用：
 
@@ -182,7 +241,7 @@ GitHub 托管运行器的 `127.0.0.1` 不是你的本机；只在自己的电脑
 
 ### 请求失败重试
 
-签到、状态和积分接口共用有限重试策略，可在 **Actions → Variables** 设置以下变量，两个站点共用：
+以下策略适用于旧 HTTP 方式和浏览器成功后的辅助读请求，两个站点共用。**浏览器签到 POST 不使用这套重试策略**：提交后未知结果停止，不重新签到；邮箱登录 API 也不重试。可在 **Actions → Variables** 设置：
 
 | Variable | 默认值 | 有效范围 | 含义 |
 |---|---|---|---|
@@ -203,6 +262,8 @@ GitHub 托管运行器的 `127.0.0.1` 不是你的本机；只在自己的电脑
 
 参考 [lankerr/2026-glados-checkin 的域名列表和请求逻辑](https://github.com/lankerr/2026-glados-checkin/blob/8649193124403fb0195c66a6e4be8b7d2103b96b/checkin.py#L35)，默认按 `glados.cloud`、`glados.rocks`、`glados.network` 的顺序尝试。每个账号从主域名开始，切换成功后，后续状态和积分查询优先使用该域名；不会改变其他账号或 Railgun 的配置。
 
+下述详细规则为旧 HTTP 请求层规则。浏览器 Cookie 模式仅在提交前浏览器/导航请求异常时可换备用域名，换域名后重新加载官网挑战；无效挑战、身份不符、验证拒绝以及已提交的未知结果不切换。邮箱模式不切换本轮登录/浏览器签到域名，避免跨域使用缓存；成功后的辅助 GET 查询仍按 HTTP 规则处理。
+
 - DNS、连接/传输临时错误、超时，以及 HTTP `408` / `500` / `502` / `503` / `504` 可切换备用域名。HTTP `301` / `302` / `303` / `307` / `308` / `404` / `410` 和 GET 返回非 JSON / 非对象时也可切换；不跟随响应的 `Location`，只访问代码中列出的候选域名。
 - HTTP `429` 不切换；有效 `Retry-After` 优先按原规则等待或停止，不通过切换绕过等待。认证、设备拒绝、会话被清除、证书错误、未知业务响应及无效 challenge 不触发切换。POST 返回格式异常时停止，避免把状态未知的响应当作域名失效。
 - 切换后重新获取该域名的 challenge、重新计算 proof 并等待，POST 的地址、`Origin`、`Referer` 和 `token` 均绑定到发放 nonce 的域名；不会把旧 nonce/proof 重放到备用域名。普通静态 POST 不跨域重放，challenge 失败也不会降级旧协议。
@@ -212,7 +273,7 @@ GitHub 托管运行器的 `127.0.0.1` 不是你的本机；只在自己的电脑
 
 ### GLaDOS 一次性 challenge
 
-GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.com/lankerr/2026-glados-checkin/pull/31) 和 [PR #33](https://github.com/lankerr/2026-glados-checkin/pull/33)：同一账号 Session 先 GET `/api/user/checkin/challenge`，读取 `nonce` 和 `ttl`，按 `SHA256(nonce + ".glados-observe-v1")` 计算 proof，等待 2.7 秒，再向同一域名 POST `token`、`nonce`、`proof`。原有账号、UA 和 Secrets 配置无需改变。Railgun 不启用这一步，保留原协议。
+GLaDOS 旧 HTTP 方式已适配一次性 challenge，参考 [lankerr 的 PR #31](https://github.com/lankerr/2026-glados-checkin/pull/31) 和 [PR #33](https://github.com/lankerr/2026-glados-checkin/pull/33)：同一账号 Session 先 GET `/api/user/checkin/challenge`，读取 `nonce` 和 `ttl`，按 `SHA256(nonce + ".glados-observe-v1")` 计算 proof，等待 2.7 秒，再向同一域名 POST `token`、`nonce`、`proof`。这一路径不提供 Turnstile 验证；若官网要求人机校验，应使用浏览器方式，而不是反复切回旧协议。Railgun 不启用这一步，保留原协议。
 
 `ttl` 单位为毫秒，仅缺失时使用 300000；必须是有限数值且大于 2700。nonce 必须是非空字符串且不超过 4096 字符，按原值 UTF-8 编码，不解码或改写。使用单调时钟核对有效期，并保守计入获取挑战的请求耗时；过期的挑战不会提交。
 
@@ -230,9 +291,9 @@ GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.
 
 若“形式变化”指 Cookie-Editor JSON 导出或站点新增必需的认证标头，则是不同的问题：账号字段只支持完整 Cookie 请求头字符串，兼容 `Cookie:` 前缀，但不转换导出数组/对象，也没有 `Authorization` 配置入口。
 
-**支持本次运行内 Cookie 更新，但不持久化：** 有效、未被认证或设备拒绝的 JSON 响应下发的 `Set-Cookie` 会按域名、路径和过期时间合并到该账号内存 CookieJar，供后续请求使用。会话或签名被删除、过期时停止后续请求。不会更改原账号 JSON、写回 GitHub Secret、重新登录或输出 Cookie 值。
+**旧 HTTP / 无邮箱模式只保存本轮更新：** 有效、未被认证或设备拒绝的 JSON 响应下发的 `Set-Cookie` 会按域名、路径和过期时间合并到该账号内存 CookieJar，供后续请求使用。会话或签名被删除、过期时停止后续请求。不更改原账号 JSON、写回 GitHub Secret 或输出 Cookie 值。浏览器邮箱模式的跨次加密缓存及有限登录恢复见第 4 节。
 
-这只能接收服务端主动下发的更新，并非保证自动续期。下一次工作流仍从原 Secret 加载，浏览器显示的半年有效期也不保证固定复制值不会被服务端撤销或替换。失效凭据仍需要重新登录并更新 Cookie；隔离 Session、UA 配置和重试不能修复 `code=-2`。
+只接收服务端主动下发的更新并非保证自动续期。未启用邮箱恢复时，下一次工作流仍从原 Secret 加载；浏览器显示的半年有效期也不保证固定复制值不会被服务端撤销或替换。失效凭据需要手动更新或使用可选邮箱恢复；隔离 Session、UA 配置和重试本身不能修复 `code=-2`。
 
 ## 7. 常见问题
 
@@ -242,7 +303,9 @@ GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.
 | 账号配置解析失败 | 检查 JSON 双引号、逗号、转义和数组结构；不要把代码围栏或 Cookie-Editor 导出数组当作账号配置。 |
 | `没有权限`、`code=-2` | 服务端没有接受该次请求的认证；不等同于能证明 Cookie 自然到期。先确认浏览器的同站点状态查询正常，再核对完整 Cookie、UA，以及浏览器是否已更新会话。 |
 | 状态接口未返回有效账号数据 | 状态响应缺少脚本预期的 `data` 或数值格式异常。HTTP 200 也可能包含业务错误，任务会失败。 |
-| `device-mismatch`、`Automated check-in detected` | 核对 Cookie 与 UA 是否来自同一浏览器平台。只读账号查询成功也不保证签到设备校验通过。 |
+| `device-mismatch`、`Automated check-in detected` | 浏览器方式可更新 Cookie 或配置邮箱恢复；旧 HTTP 方式核对 Cookie 与 UA 是否来自同一浏览器平台。只读账号查询成功不保证签到设备校验通过。 |
+| `reason=turnstile`、`Cloudflare verification failed`、人机校验超时 | 浏览器等待官网验证，不就绪时不签到；服务端仍拒绝时停止，不发验证码或重放签到。`verify_only` 可用于已有会话的验证排查，不能保证签到或积分恢复。 |
+| `Native Chrome/Edge not found`、浏览器锁/配置错误 | 确认运行环境已安装 Chrome，检查项目内 runtime 路径和旧锁；不要将运行目录改到项目外或自动删除其他进程的锁。 |
 | `Checkin Repeats! Please Try Tomorrow` | 重复签到，不应反复重试。 |
 | GLaDOS 每个账号都获得 2 分或出现“低奖励提醒” | 明确奖励仍算签到成功，不自动补签。核对 UA 来源、规范化提示、传输预设和网络模式，并对照官网记录及跨天结果；不能仅凭这个分值认定原因是 IP、设备校验或平台统一降分。 |
 | `Today's observation logged. Return tomorrow for more points.` | 今日已记录，脚本按“今日已签到”展示，不代表每次调用都会增加积分。 |
@@ -255,16 +318,19 @@ GLaDOS 已适配官网新版流程，参考 [lankerr 的 PR #31](https://github.
 
 2026-11-03 的只读排查已确认当时仓库中的 4 份 GLaDOS 凭据均含完整新版字段，但状态和积分接口仍返回 `code=-2`，且没有下发 `Set-Cookie`。因此，字段名已更新本身不能解决那次认证失败；现有证据也不能确定是正常到期、撤销还是旧会话被替换。
 
-本地运行建议使用 Python 3.11 或更新版本，并从仓库根目录执行 `python -m pip install -r panels/requirements.txt` 安装 `requests`、`curl_cffi` 的固定版本；工作流使用同一文件。安装位置和缓存应保持在自己指定的项目环境中。运行前预先设置对应环境变量。`panels/checkin.py` 不自动读取 `.env`，`nodeseek/.env.example` 也不是面板脚本的自动配置入口。默认本地运行同样会真实签到和推送。只读诊断可从仓库根目录执行：
+本地运行建议使用 Python 3.11 或更新版本，浏览器方式还需已安装的 Chrome。依赖由 `panels/requirements.txt` 固定，包含 `requests`、`curl_cffi`、`playwright`、`cryptography`；建议 `pip --target .cache/panels/deps` 安装并设置 `PYTHONPATH` 指向该项目内目录，同时将 pip cache 和 `TEMP` / `TMP` / `TMPDIR` 指向项目内已创建的目录。不要把依赖、临时配置或下载放到项目外。运行前设置对应环境变量，浏览器本地运行额外设 `GLADOS_BROWSER_CHECKIN=1`。`panels/checkin.py` 不自动读取 `.env`。默认本地运行仍会真实签到和推送。只读命令从仓库根目录执行：
 
 ```shell
 python -B panels/checkin.py --diagnose
+python -B panels/checkin.py --verify-browser
 ```
 
-也可设置 `PANEL_DIAGNOSTIC_ONLY=true`。无法识别的布尔值会直接失败，不意外执行签到。诊断仍使用账号凭据访问状态接口，但不发送签到 POST。
+也可设置 `PANEL_DIAGNOSTIC_ONLY=true` 或 `GLADOS_VERIFY_ONLY=true`，两者互斥。无法识别的布尔值会直接失败，不意外执行签到。两种诊断都使用账号凭据，但不发送应用签到 POST。
 
 只运行离线回归测试时，从仓库根目录执行以下命令，不使用真实 Cookie、不联网签到。已安装 `curl_cffi` 时，请求头和代理回归会启动仅绑定 `127.0.0.1` 的临时 HTTP 服务；未安装时这些真实传输测试跳过，不能替代依赖齐全时的验证：
 
 ```shell
 python -B -m unittest discover -s panels -p "test_*.py"
 ```
+
+额外设置 `GLADOS_BROWSER_TESTS=1` 可执行真实原生 Chrome 的回环模拟测试，验证一次 POST、拦截其他应用写请求、账号隔离及只读验证。模拟站点只监听 `127.0.0.1`，使用虚构 Cookie，不访问 GLaDOS/邮箱；浏览器 headless 模式的临时配置和测试产物限定在 `.cache/panels/`。这类测试通过不等于你的真实账号已签到。

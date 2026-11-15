@@ -14,23 +14,30 @@
 
 ## Workflows
 
-- `panels.yml` —— GLaDOS + Railgun（API 签到，curl_cffi）
+- `panels.yml` —— GLaDOS（默认原生 Chrome + Playwright/CDP）+ Railgun（HTTP API）
 - `daily.yml` —— NodeSeek + DeepFlood + linux.sb（浏览器过盾）
 
 GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及排障方法见
 [`panels/README.md`](panels/README.md)。
 
-面板脚本兼容原有 `email` + `cookie` 配置，可选增加账号级 `user_agent` / `impersonate`，无需批量重配。每个账号独立 HTTP Session，同账号复用连接和内存 Cookie 更新，但不提供独立浏览器/IP、不写回 Secrets。临时网络错误有限重试；任一账号或通知失败使工作流标红。手动运行勾选 `diagnose_only` 可只读查询登录状态，不签到、不推送。
+面板脚本仍接受原有 `email` + `cookie` 配置。GLaDOS 默认通过原生 Chrome 访问官网签到页，使用浏览器实际 UA、独立账号上下文和官网验证流程；不提供每账号独立 IP，也不保证旧 Cookie 通过设备校验。Variable `GLADOS_BROWSER_CHECKIN=0` 可切回旧 HTTP 方式，Railgun 和其他站点保持原流程。浏览器已提交但结果未知时不重复签到；任一账号或通知失败仍使工作流标红。
+
+可选配置 `GLADOS_GMAIL_ADDRESS`、`GLADOS_GMAIL_APP_PASSWORD`、`GLADOS_COOKIE_STORE_KEY` 三个 Secrets，并将账号验证码邮件转发到该 Gmail，可在明确登录失效或设备不一致时有限恢复会话。恢复后的 Cookie 只保存为项目内加密文件，通过 Actions cache 复用，不写回 Secrets，不缓存浏览器明文配置。未配置邮箱时仍可使用有效 Cookie。
+
+手动运行勾选 `diagnose_only` 仅查询账号状态；勾选 `verify_only` 仅检查 GLaDOS 浏览器挑战和验证是否就绪，不签到、不发验证码、不保存会话、不推送。两项不能同时选择。浏览器验证就绪不等于真实签到已经成功。
 
 面板工作流使用 `panels/requirements.txt` 固定关键依赖版本，并在仓库内跨分支互斥执行。日志区分首次奖励、今日观察记录和重复签到，GLaDOS 首次奖励不超过 2 分时提醒但不标记失败、不补签；Variable `GLADOS_LOW_REWARD_THRESHOLD` 可调整阈值，设为 `0` 关闭提醒。
 
-可选 Secret `GLADOS_PROXY_URL` 仅用于 GLaDOS 的 challenge、签到及后续查询，所有请求使用同一显式代理；留空保持原网络行为，不影响 Railgun、其他站点或通知。它可连接已存在的 HTTP/SOCKS5 代理，包括已配置的 WARP 代理，但**不会安装或启用 WARP，也不保证提高积分**。代理必须可从实际运行器访问，仅在本机运行的代理不能直接供 GitHub 托管运行器使用；配置和排障见 [`panels/README.md`](panels/README.md)。
+可选 Secret `GLADOS_PROXY_URL` 用于 GLaDOS 浏览器、登录 API 和后续查询；所有账号共用同一显式代理，故障不静默直连。浏览器模式留空时直连，不继承环境代理；旧 HTTP 方式保持原环境代理规则。不影响 Railgun、其他站点、Gmail IMAP 或通知。支持现有 HTTP/HTTPS 和无认证 SOCKS5 代理，包括已配置的 WARP 代理，但**不会安装或启用 WARP，也不保证提高积分**。代理必须可从实际运行器访问；配置和排障见 [`panels/README.md`](panels/README.md)。
 
 ## Secrets 清单（账号类）
 
 | 名称 | 用途 |
 |---|---|
 | `GLADOS_ACCOUNTS_JSON` | GLaDOS 账号 JSON 数组（email + cookie） |
+| `GLADOS_GMAIL_ADDRESS` | 可选：统一接收验证码邮件的 Gmail，三项须一起配置 |
+| `GLADOS_GMAIL_APP_PASSWORD` | 可选：上述 Gmail 的应用专用密码，不是登录密码 |
+| `GLADOS_COOKIE_STORE_KEY` | 可选：固定 Fernet 加密密钥，用于跨次运行复用会话 |
 | `RAILGUN_ACCOUNTS_JSON` | Railgun 账号 JSON 数组（email + cookie） |
 | `NS_COOKIE` / `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE` / `LINUXSB_ACCOUNT` / `NS_RANDOM` | 三站签到，详见 [`nodeseek/README.md`](nodeseek/README.md) |
 
@@ -71,7 +78,7 @@ GLaDOS / Railgun 的完整配置步骤、账号 JSON 示例、Cookie 获取及�
 
 1. **单个服务**：删除或清空对应 secret → 脚本自动跳过（推荐）；
 2. **整个 workflow**：Actions 页面 Disable，或 `gh workflow disable panels.yml`；
-3. **面板登录设备不一致时**：给对应面板配置 vars `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT`（未设置时回退同名 Secret），或给账号 JSON 增加可选 `user_agent` 字段覆盖默认 Windows Chrome 124 UA。账号级设置优先，只规范化复制时附带的请求头前缀、外层引号和两端空格，不改写浏览器平台或版本；UA 和近似传输预设不能保证完整浏览器指纹一致。
+3. **登录设备不一致时**：GLaDOS 浏览器模式使用浏览器实际 UA，可更新有效 Cookie 或配置邮箱恢复；旧 HTTP 方式和 Railgun 才使用 `GLADOS_USER_AGENT` / `RAILGUN_USER_AGENT` 或账号级 `user_agent`。UA 和近似传输预设不能保证完整浏览器指纹一致。
 
 ## 其他说明
 
