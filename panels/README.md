@@ -110,7 +110,7 @@ gld:sess=REPLACE_WITH_SESSION; gld:sess.sig=REPLACE_WITH_SIGNATURE
 
 ### 人工接码登录（不需要 Gmail）
 
-`glados-manual-login` 是单账号实验入口：运行器的原生 Chrome 请求一次邮件验证码，等待人工回码，在同一云端浏览器环境完成登录，再实际签到。它不运行其他站点、不兑换积分，也不反复请求验证码。每次只选择 `GLADOS_ACCOUNTS_JSON` 中的一个账号，`email` 必须是真实登录邮箱。
+`glados-manual-login` 是单账号实验入口：运行器的原生 Chrome 请求一次邮件验证码，等待人工回码，在同一云端浏览器环境完成登录，再实际签到。人工登录与日常面板任务均使用 `ubuntu-24.04`。它不运行其他站点、不兑换积分，也不反复请求验证码。每次只选择 `GLADOS_ACCOUNTS_JSON` 中的一个账号，`email` 必须是真实登录邮箱。
 
 运行 **Actions → glados-manual-login → Run workflow**，`account` 填账号序号。只有修改 `.github/glados-manual-login.trigger` 并使用包含 `[glados-manual-login]` 的提交说明推送到 `main`，才会通过 SSH 推送入口触发；普通提交和回码文件更新不触发签到。与正式面板任务共用并发组。
 
