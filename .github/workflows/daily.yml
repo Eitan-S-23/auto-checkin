@@ -1,9 +1,16 @@
 name: daily-checkin (NodeSeek/DeepFlood/linux.sb)
 
 on:
+  push:
+    branches: [main]
+    paths: ['.github/nodeseek-checkin.trigger']
   # 支持在 Actions 页面手动触发，便于验证配置是否生效
   workflow_dispatch:
     inputs:
+      nodeseek_only:
+        description: '只验证 NodeSeek/DeepFlood，不运行 linux.sb 或附加任务'
+        type: boolean
+        default: false
       linuxsb_force_browser:
         description: 'linux.sb 跳过 requests 探测直接走浏览器通道（验证兜底通道用）'
         type: boolean
@@ -11,16 +18,44 @@ on:
   schedule:
     - cron: '00 0 * * *'  # UTC 00:00，即北京时间 08:00
 
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-checkin-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   run-nodeseek-daily:
+    if: ${{ github.event_name != 'push' || contains(github.event.head_commit.message, '[nodeseek-checkin]') }}
     # Pin the runner: Ubuntu 26.04 has no Python 3.11.8 build.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
     # 设定时区为北京时间，使脚本内 time.localtime/strftime 输出 UTC+8，
     # 通知里的"执行时间"不再显示 UTC，与签到自然日对齐。
     # 通知与站间延迟变量放在 job 级：NodeSeek 与 LinuxSB 两个步骤共用，
     # 避免同一组变量在两个步骤里重复声明。
     env:
       TZ: Asia/Shanghai
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONPATH: ${{ github.workspace }}/.cache/nodeseek/deps
+      PIP_CACHE_DIR: ${{ github.workspace }}/.cache/nodeseek/pip
+      PIP_CONFIG_FILE: /dev/null
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_INPUT: '1'
+      SSLKEYLOGFILE: ''
+      # Chrome's Unix socket paths must stay below Linux's 108-byte limit.
+      TMPDIR: ${{ github.workspace }}/.cache/ns-t
+      TMP: ${{ github.workspace }}/.cache/ns-t
+      TEMP: ${{ github.workspace }}/.cache/ns-t
+      # Only the NodeSeek/DeepFlood browser receives a proxy; other clients stay direct.
+      NS_WARP_ENABLED: ${{ vars.NS_WARP != 'false' && vars.NS_WARP != '0' && '1' || '0' }}
+      NS_CUSTOM_PROXY: ${{ secrets.NS_PROXY != '' && '1' || '0' }}
       # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
       SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
       SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
@@ -100,44 +135,64 @@ jobs:
 
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v4
+
+      - name: Prepare project runtime
+        run: mkdir -p "$TMPDIR" "$PYTHONPATH" "$PIP_CACHE_DIR" .cache/nodeseek/home
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11.8'
 
-      # runner 镜像（Ubuntu 24.04）已预装 Google Chrome 与匹配的 ChromeDriver，
+      # runner 镜像（Ubuntu 24.04）已预装 Google Chrome、ChromeDriver 和 Xvfb，
       # 不要再 apt 安装 chromium-browser：该包在 24.04 上只是转发到 snap 的过渡包，
-      # 装完得不到可用浏览器。这里只补装 xvfb 用于提供虚拟显示。
-      - name: Install Xvfb
+      # 装完得不到可用浏览器。直接使用镜像中的虚拟显示，避免全局安装。
+      - name: Check Chrome and Xvfb
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
+          command -v xvfb-run
           echo "Chrome version:"
           google-chrome --version
           echo "ChromeDriver version:"
           chromedriver --version
 
       - name: Install Python dependencies
+        id: deps
         run: |
-          python -m pip install --upgrade pip
-          pip install -r nodeseek/requirements.txt
+          python -m pip install --disable-pip-version-check --no-compile --target "$PYTHONPATH" -r nodeseek/requirements.txt
+
+      - name: Run offline regression tests
+        run: |
+          bash -n nodeseek/warp_proxy.sh
+          python -B -m unittest discover -s nodeseek -p 'test_*.py' -q
+
+      - name: Start scoped WARP proxy
+        id: warp
+        if: ${{ env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' }}
+        run: bash nodeseek/warp_proxy.sh start
 
       - name: Run NodeSeek script
         env:
+          HOME: ${{ github.workspace }}/.cache/nodeseek/home
+          NS_PROXY: ${{ secrets.NS_PROXY || (env.NS_WARP_ENABLED == '1' && 'socks5://127.0.0.1:40000' || '') }}
+          NS_WARP_REQUIRED: ${{ env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' && '1' || '0' }}
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
           NS_RANDOM: ${{ vars.NS_RANDOM || secrets.NS_RANDOM }}
           # 在 xvfb 提供的虚拟显示下跑有头浏览器：headless 指纹会被 Cloudflare 拦在挑战页，
           # 有头模式指纹更接近真实用户，是目前能通过 5 秒盾的可行方式。
           HEADLESS: "false"
           # 除签到外的任务（评论、加鸡腿）总开关，未配置时默认关闭
-          NS_EXTRA_TASKS: ${{ vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS }}
+          NS_EXTRA_TASKS: ${{ github.event_name != 'push' && !inputs.nodeseek_only && (vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS) || 'false' }}
           # deepflood 子站 cookie（可选，配置后两站顺序签到，中间自动随机延迟）
           # 注意 secret 名是 DEEPFLOOD_COOKIE（DEEP），须与拼写完全一致。
           DEEPFLOOD_COOKIE: ${{ secrets.DEEPFLOOD_COOKIE }}
         run: |
-          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek/nodeseek_daily.py
+          xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/nodeseek_daily.py
+
+      - name: Stop scoped WARP proxy
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: bash nodeseek/warp_proxy.sh stop
 
       # linux.sb（烧饼社区）2026-08 起会间歇性开启 Cloudflare 托管挑战：命中时
       # 非浏览器客户端收到 403 + Cf-Mitigated: challenge（本地住宅 IP、补全浏览器
@@ -146,7 +201,9 @@ jobs:
       # 用 xvfb-run 提供虚拟显示，配合 HEADLESS=false 走有头浏览器，与 NodeSeek
       # 步骤同一配比（--headless=new 与 xvfb 叠加会令元素定位卡死）。
       - name: Run LinuxSB script
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' && github.event_name != 'push' && !inputs.nodeseek_only }}
         env:
+          HOME: ${{ github.workspace }}/.cache/nodeseek/home
           # linux.sb 签到 cookie（可选，配置后三站顺序签到）
           LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
           # 账号密码兜底登录（可选）：cookie 缺失或失效时自动登录，
@@ -159,4 +216,4 @@ jobs:
           LINUXSB_FORCE_BROWSER: ${{ inputs.linuxsb_force_browser && '1' || '' }}
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
-          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek/linuxsb_daily.py
+          xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/linuxsb_daily.py

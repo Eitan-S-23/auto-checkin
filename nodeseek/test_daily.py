@@ -97,6 +97,98 @@ class ChromeVersionTestCase(unittest.TestCase):
             self.assertIsNone(daily.detect_chrome_major_version())
 
 
+class BrowserProxyTestCase(unittest.TestCase):
+    def test_proxy_normalization(self):
+        for raw, expected in (
+            ("", ""),
+            (None, ""),
+            ("socks5h://127.0.0.1:40000", "socks5://127.0.0.1:40000"),
+            (" http://proxy.example:8080/ ", "http://proxy.example:8080"),
+            ("socks5://[::1]:40000", "socks5://[::1]:40000"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(daily.normalize_browser_proxy(raw), expected)
+
+    def test_invalid_proxies_do_not_leak_credentials(self):
+        for raw in (
+            "http://user:private-password@proxy.example:8080",
+            "socks5://127.0.0.1",
+            "socks5://127.0.0.1:0",
+            "socks5://127.0.0.1:70000",
+            "ftp://proxy.example:21",
+            "socks5://127.0.0.1:40000/path",
+            "socks5://127.0.0.1:40000?fallback=direct",
+            "socks5://127.0.0.1:40000#fragment",
+            "socks5://127.0.0.1:40000;direct://",
+            "socks5://bad host:40000",
+            "socks5://127.0.0.1:40000\n--no-proxy-server",
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError) as error:
+                daily.normalize_browser_proxy(raw)
+            self.assertIn("NS_PROXY", str(error.exception))
+            self.assertNotIn("private-password", str(error.exception))
+            self.assertNotIn(raw, str(error.exception))
+
+    def _create(self, proxy="", required="0", verified=True):
+        driver = mock.Mock()
+        options = mock.Mock()
+        with mock.patch.dict(daily.os.environ, {"NS_PROXY": proxy, "NS_WARP_REQUIRED": required}), \
+                mock.patch.object(daily.uc, "ChromeOptions", return_value=options), \
+                mock.patch.object(daily.uc, "Chrome", return_value=driver) as chrome, \
+                mock.patch.object(daily, "detect_chrome_major_version", return_value=157), \
+                mock.patch.object(daily, "verify_browser_warp", return_value=verified) as verify, \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = daily.create_driver()
+        arguments = [call.args[0] for call in options.add_argument.call_args_list]
+        return result, driver, arguments, chrome, verify
+
+    def test_browser_receives_scoped_proxy_and_disables_udp_bypass(self):
+        result, driver, arguments, _, verify = self._create("socks5h://127.0.0.1:40000", "1")
+        self.assertIs(result, driver)
+        self.assertIn("--proxy-server=socks5://127.0.0.1:40000", arguments)
+        self.assertIn("--disable-quic", arguments)
+        self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", arguments)
+        verify.assert_called_once_with(driver)
+
+    def test_direct_mode_is_unchanged_when_warp_is_disabled(self):
+        result, driver, arguments, _, verify = self._create()
+        self.assertIs(result, driver)
+        self.assertFalse(any(arg.startswith("--proxy-server=") for arg in arguments))
+        self.assertNotIn("--disable-quic", arguments)
+        verify.assert_not_called()
+
+    def test_required_warp_without_proxy_does_not_start_chrome(self):
+        result, _, _, chrome, verify = self._create(required="1")
+        self.assertIsNone(result)
+        chrome.assert_not_called()
+        verify.assert_not_called()
+
+    def test_browser_that_bypasses_warp_is_closed_before_signing(self):
+        result, driver, _, _, _ = self._create("socks5://127.0.0.1:40000", "1", False)
+        self.assertIsNone(result)
+        driver.quit.assert_called_once()
+
+
+class BrowserWarpTraceTestCase(unittest.TestCase):
+    def test_only_verified_warp_modes_are_accepted(self):
+        for mode, expected in (("on", True), ("plus", True), ("off", False), ("", False)):
+            text = f"ip=192.0.2.10\ncolo=IAD\nwarp={mode}\n"
+            driver = mock.Mock(page_source="<pre>trace</pre>")
+            with self.subTest(mode=mode), \
+                    mock.patch.object(daily, "BeautifulSoup", return_value=_TextSoup(text)), \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                self.assertEqual(daily.verify_browser_warp(driver), expected)
+            driver.get.assert_called_once_with("https://www.cloudflare.com/cdn-cgi/trace")
+            self.assertNotIn("192.0.2.10", log.getvalue())
+
+    def test_trace_network_failure_is_not_success(self):
+        driver = mock.Mock()
+        driver.get.side_effect = TimeoutError("private-proxy-value")
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(daily.verify_browser_warp(driver))
+        self.assertNotIn("private-proxy-value", log.getvalue())
+
+
 def _site_result(site, sign, comment_stats, summary, started_at="2026-07-30 08:00:00"):
     """构造 build_notify_content 需要的单站结果元组。"""
     return (site, sign, comment_stats, summary, started_at)
@@ -282,6 +374,25 @@ class RunTestCase(unittest.TestCase):
             code = daily.run()
 
         self.assertIn("试注入仍无效", log.getvalue())
+
+
+    def test_access_failure_is_reported_and_does_not_skip_second_site(self):
+        first = daily.Site("NodeSeek", "nodeseek.com", "session=x")
+        first.access_error = "签到失败: 未能通过 Cloudflare 挑战"
+        second = daily.Site("DeepFlood", "deepflood.com", "session=y")
+        patches = self._patch_run_env(
+            load_sites=mock.patch.object(daily, "load_sites", return_value=[first, second]),
+            inject_site_cookies=mock.patch.object(daily, "inject_site_cookies", side_effect=[False, True]),
+        )
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(daily, "extra_tasks_enabled", False))
+            stack.enter_context(mock.patch.object(daily.time, "sleep"))
+            mocks = {key: stack.enter_context(patcher) for key, patcher in patches.items()}
+            self.assertEqual(daily.run(), 1)
+        self.assertEqual(mocks["inject_site_cookies"].call_count, 2)
+        mocks["click_sign_icon"].assert_called_once_with(self.DRIVER, second, logged_in=False)
+        self.assertIn("Cloudflare 挑战", mocks["send"].call_args.args[1])
+        self.assertNotIn("cookie 注入失败", mocks["send"].call_args.args[1])
 
 
 class ShouldSkipCookieTestCase(unittest.TestCase):
@@ -475,6 +586,42 @@ class _TextSoup:
         return self._text
 
 
+class AccessBlockTestCase(unittest.TestCase):
+    def test_explicit_ip_ban_is_distinguished_from_challenge_timeout(self):
+        for page in ("Your IP address has been banned", "当前 IP 已被封禁", "IP地址被拉黑"):
+            driver = _FakeDriver("")
+            driver.page_source = page
+            with self.subTest(page=page):
+                self.assertIn("IP", daily.access_block_reason(driver))
+                self.assertFalse(daily.wait_for_cloudflare(driver))
+
+    def test_cloudflare_block_page_is_not_mistaken_for_success(self):
+        driver = _FakeDriver("")
+        driver.title = "Sorry, you have been blocked"
+        self.assertIn("Cloudflare/WAF", daily.access_block_reason(driver))
+        self.assertFalse(daily.wait_for_cloudflare(driver))
+
+    def test_challenge_timeout_does_not_claim_cookie_has_expired(self):
+        driver = _FakeDriver("")
+        driver.title = "Just a moment..."
+        self.assertEqual(daily.access_block_reason(driver), "")
+        self.assertFalse(daily.wait_for_cloudflare(driver, timeout=0))
+        detail = daily.access_failure_detail(driver)
+        self.assertIn("Cloudflare 挑战", detail)
+        self.assertIn("尚未确认 cookie 失效", detail)
+        self.assertNotIn("cookie 已失效", detail)
+
+    def test_normal_forum_page_is_not_a_block(self):
+        driver = _FakeDriver("今日签到")
+        self.assertEqual(daily.access_block_reason(driver), "")
+        self.assertTrue(daily.wait_for_cloudflare(driver))
+
+    def test_forum_posts_discussing_ip_bans_are_not_block_pages(self):
+        driver = _FakeDriver("")
+        driver.page_source = "<article>当前 IP 已被封禁</article>" + "forum content" * 2000
+        self.assertEqual(daily.access_block_reason(driver), "")
+
+
 class _AlwaysTimeoutWait:
     """模拟 WebDriverWait 等不到元素时抛异常。"""
 
@@ -587,6 +734,26 @@ class InjectSiteCookiesTestCase(unittest.TestCase):
         ok, _, output = self._inject("session=abc; pjwt=y")
         self.assertTrue(ok)
         self.assertNotIn("试注入", output)
+
+
+class CookieAccessFailureTestCase(unittest.TestCase):
+    def test_initial_access_failure_does_not_inject_cookies_or_claim_expiry(self):
+        driver = _FakeDriver("")
+        driver.title = "Just a moment..."
+        site = daily.Site("NodeSeek", "nodeseek.com", "session=abc")
+        with mock.patch.object(daily, "wait_for_cloudflare", return_value=False):
+            self.assertFalse(daily.inject_site_cookies(driver, site))
+        self.assertEqual(driver.cookies, [])
+        self.assertIn("Cloudflare 挑战", site.access_error)
+
+    def test_access_failure_after_refresh_is_preserved(self):
+        driver = _FakeDriver("")
+        site = daily.Site("DeepFlood", "deepflood.com", "session=abc")
+        with mock.patch.object(daily, "wait_for_cloudflare", side_effect=[True, False]), \
+                mock.patch.object(daily.time, "sleep"):
+            self.assertFalse(daily.inject_site_cookies(driver, site))
+        self.assertEqual(driver.cookies, [("session", "abc")])
+        self.assertIn("Cloudflare 挑战", site.access_error)
 
 
 if __name__ == "__main__":

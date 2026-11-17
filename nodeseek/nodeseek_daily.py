@@ -5,6 +5,7 @@ Licensed under the MIT License.
 See LICENSE file in the project root for full license information.
 """
 import os
+import ipaddress
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -17,6 +18,7 @@ import time
 import traceback
 import sys
 import unicodedata
+from urllib.parse import urlsplit
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
@@ -47,6 +49,51 @@ def env_bool(name, default=False):
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in ("true", "1", "yes", "on", "y")
+
+
+def normalize_browser_proxy(raw):
+    """Validate a Chrome proxy endpoint without exposing it in error messages."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        scheme = "socks5" if parts.scheme == "socks5h" else parts.scheme
+        host = parts.hostname
+        port = parts.port
+        if (scheme not in ("http", "https", "socks5") or not host or not port
+                or parts.username is not None or parts.password is not None
+                or parts.path not in ("", "/") or parts.query or parts.fragment
+                or any(char.isspace() for char in raw)):
+            raise ValueError
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host):
+                raise ValueError
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{scheme}://{host}:{port}"
+    except ValueError:
+        raise ValueError("NS_PROXY must be an HTTP(S)/SOCKS5 host:port URL without credentials or paths") from None
+
+
+def verify_browser_warp(driver):
+    """Verify the browser itself uses WARP, not just the shell's curl command."""
+    try:
+        driver.get("https://www.cloudflare.com/cdn-cgi/trace")
+        text = BeautifulSoup(driver.page_source, "html.parser").get_text("\n", strip=True)
+        fields = dict(re.findall(r"(?m)^(warp|colo)=([^\r\n]+)$", text))
+        if fields.get("warp") not in ("on", "plus"):
+            print("浏览器 WARP 验证失败: trace 未显示 warp=on/plus", flush=True)
+            return False
+        colo = fields.get("colo", "")
+        colo = colo if re.fullmatch(r"[A-Z]{3}", colo) else "unknown"
+        print(f"浏览器 WARP 验证通过 (warp={fields['warp']}, colo={colo})", flush=True)
+        return True
+    except Exception as error:
+        print(f"浏览器 WARP 验证失败: {type(error).__name__}", flush=True)
+        return False
 
 
 # 不应注入的 cookie。
@@ -305,6 +352,7 @@ class Site:
         self.domain = domain      # 不含协议，如 nodeseek.com
         self.cookie = cookie      # 原始 cookie 字符串，形如 "session=xxx; pjwt=yyy"
         self.base = f"https://www.{domain}"
+        self.access_error = ""
 
     @property
     def home_url(self):
@@ -382,6 +430,30 @@ SIGNED_REWARD_PATTERN = re.compile(
 )
 
 
+def access_block_reason(driver):
+    """Recognize explicit block pages without logging page source or account data."""
+    try:
+        title = (driver.title or "").lower()
+        source = driver.page_source or ""
+        # Full forum pages can contain posts discussing IP bans; those are not block pages.
+        page = title + " " + (source[:8000].lower() if len(source) <= 16000 or "cf-error-details" in source else "")
+        if (re.search(r"\b(?:your|this|current)\s+ip(?:\s+address)?\s+(?:is|has been)\s+(?:banned|blocked)", page)
+                or re.search(r"ip(?:\s*地址)?\s*(?:已|被|遭到){1,2}\s*(?:封禁|封锁|拉黑)", page)):
+            return "网站明确提示当前 IP 被封禁或拦截"
+        if ("sorry, you have been blocked" in page
+                or re.search(r"error(?:\s+code)?[^\d]{0,30}(?:1006|1007|1008|1020)\b", page)
+                or ("access denied" in title and "cloudflare" in page)):
+            return "访问被 Cloudflare/WAF 拦截（并非已确认的 cookie 失效）"
+    except Exception:
+        pass
+    return ""
+
+
+def access_failure_detail(driver):
+    reason = access_block_reason(driver)
+    return "签到失败: " + (reason or "未能通过 Cloudflare 挑战（出口 IP 风控或浏览器指纹，尚未确认 cookie 失效）")
+
+
 def is_cloudflare_challenge(driver):
     """判断当前页面是否停留在 Cloudflare 挑战页。"""
     try:
@@ -402,18 +474,26 @@ def wait_for_cloudflare(driver, timeout=60):
     undetected-chromedriver 通常能自动过盾，但需要给它时间；
     这里轮询直到页面不再是挑战页，超时返回 False 由调用方决定如何处理。
     """
+    reason = access_block_reason(driver)
+    if reason:
+        print(reason, flush=True)
+        return False
     if not is_cloudflare_challenge(driver):
         return True
 
     print(f"检测到 Cloudflare 挑战页，最多等待 {timeout} 秒...")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         time.sleep(3)
+        reason = access_block_reason(driver)
+        if reason:
+            print(reason, flush=True)
+            return False
         if not is_cloudflare_challenge(driver):
             print("Cloudflare 挑战已通过")
             return True
 
-    print("Cloudflare 挑战在超时内未通过")
+    print("Cloudflare 挑战在超时内未通过（出口 IP 风控或浏览器指纹，尚未确认 cookie 失效）", flush=True)
     return False
 
 
@@ -543,7 +623,7 @@ def click_sign_icon(driver, site, logged_in=True):
         print(f"[{site.name}] 签到页已请求，开始等待 Cloudflare...", flush=True)
         # 签到页同样可能被 Cloudflare 拦下
         if not wait_for_cloudflare(driver):
-            return {"success": False, "detail": "签到失败: 未能通过 Cloudflare 挑战"}
+            return {"success": False, "detail": access_failure_detail(driver)}
 
         time.sleep(2)
         print(f"当前页面URL: {driver.current_url}", flush=True)
@@ -642,6 +722,7 @@ def create_driver():
     初始化浏览器实例，不绑定任何站点 cookie。
     多站点共用同一个 driver，各自注入自己的 cookie 后操作各自域名。
     """
+    driver = None
     try:
         print("开始初始化浏览器...")
         options = uc.ChromeOptions()
@@ -652,6 +733,15 @@ def create_driver():
         # 反而会成为 Cloudflare 的识别特征，让 undetected-chromedriver 使用真实 UA。
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--window-size=1920,1080')
+        proxy = normalize_browser_proxy(os.environ.get("NS_PROXY", ""))
+        if env_bool("NS_WARP_REQUIRED") and not proxy:
+            raise ValueError("NS_WARP_REQUIRED requires NS_PROXY")
+        if proxy:
+            options.add_argument(f"--proxy-server={proxy}")
+            # SOCKS5 carries TCP only; avoid QUIC/WebRTC sending UDP outside WARP.
+            options.add_argument('--disable-quic')
+            options.add_argument('--force-webrtc-ip-handling-policy=disable_non_proxied_udp')
+            print("NodeSeek/DeepFlood 浏览器代理已启用", flush=True)
 
         if headless:
             # 无头模式指纹更容易被 Cloudflare 识别。
@@ -677,10 +767,18 @@ def create_driver():
         # 隐藏 webdriver 标记，有头/无头模式都需要
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.set_window_size(1920, 1080)
+        driver.set_page_load_timeout(90)
+        if env_bool("NS_WARP_REQUIRED") and not verify_browser_warp(driver):
+            raise RuntimeError("浏览器未通过 WARP 验证，停止签到以避免静默直连")
         print("Chrome启动成功")
         return driver
 
     except Exception as e:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
         print(f"初始化浏览器出错: {str(e)}")
         print("详细错误信息:")
         print(traceback.format_exc())
@@ -693,11 +791,15 @@ def inject_site_cookies(driver, site):
     返回 True 表示注入成功且看起来已登录，False 表示注入失败。
     """
     try:
+        site.access_error = ""
         print(f"[{site.name}] 正在设置cookie...", flush=True)
         driver.get(site.home_url)
 
         # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
-        wait_for_cloudflare(driver)
+        if not wait_for_cloudflare(driver):
+            site.access_error = access_failure_detail(driver)
+            print(f"[{site.name}] {site.access_error}", flush=True)
+            return False
 
         pairs, skipped = parse_cookie_string(site.cookie)
         for reason in skipped:
@@ -750,7 +852,9 @@ def inject_site_cookies(driver, site):
 
         # 带上登录态后可能再次遇到挑战，这里等待通过后再交给后续任务
         if not wait_for_cloudflare(driver):
-            print(f"[{site.name}] Cloudflare 挑战未通过，后续操作很可能失败")
+            site.access_error = access_failure_detail(driver)
+            print(f"[{site.name}] {site.access_error}", flush=True)
+            return False
 
         return True
 
@@ -1000,7 +1104,8 @@ def run():
         print(f"=== 处理 {site.name}（{site.domain}）===")
         if not inject_site_cookies(driver, site):
             # cookie 注入失败也要纳入结果，让通知体现这一站异常
-            site_results.append((site, {"success": False, "detail": "cookie 注入失败"}, None, {}, started_at))
+            detail = site.access_error or "cookie 注入失败"
+            site_results.append((site, {"success": False, "detail": detail}, None, {}, started_at))
             continue
 
         # 先抓账号概览：它同时是"已登录"的证据，也是通知里的账号状态来源。
@@ -1034,6 +1139,7 @@ def run():
             comment_stats = None
 
         sign_result = click_sign_icon(driver, site, logged_in=logged_in)
+        print(f"[{site.name}] {sign_result['detail']}", flush=True)
 
         site_results.append((site, sign_result, comment_stats, account_summary, started_at))
 

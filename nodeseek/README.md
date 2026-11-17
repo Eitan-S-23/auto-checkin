@@ -25,12 +25,24 @@
 - `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）。**注意 GitHub Actions 中需用有头模式（`false`）配合 xvfb 才能通过 Cloudflare 挑战**，workflow 已硬编码为 `false`，本地无显示环境时可用 `true`
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同。同样建议整段复制（含 `session`）
+- `NS_WARP`: Actions 仓库 Variable，默认启用 WARP。设为 `false` 或 `0` 可恢复直连；无需配置 WARP 密钥或在本机安装 VPN
+- `NS_PROXY`: 可选的浏览器代理，例如 `socks5://127.0.0.1:40000`。Actions 中作为 Secret 配置后会替代内置 WARP；支持 HTTP、HTTPS、SOCKS5，暂不支持用户名密码认证。只影响 NodeSeek / DeepFlood，不影响 linux.sb、GLaDOS 或通知
 - `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起会**间歇性**开启 Cloudflare 托管挑战（同一出口 IP 可能上一轮 403、下一轮 200），脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
 - `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；Cookie 缺失或失效时自动用浏览器登录（算术题验证码由脚本解出填写，PoW 由页面 JS 计算），登录成功当场在同一浏览器会话内继续签到，无需手动换 cookie
 - `LINUXSB_FORCE_BROWSER`: 置 `1` 时 linux.sb 跳过 requests 探测直接走浏览器通道（可选）。用于站点长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
+
+### WARP 与 IP 风控
+
+Actions 默认使用项目内的用户态 WARP SOCKS5 代理（[wgcf v2.3.1](https://github.com/ViRb3/wgcf/releases/tag/v2.3.1) + [wireproxy v1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)），下载文件校验固定 SHA-256，不使用公开共享私钥、不改系统路由。只有 NodeSeek / DeepFlood 浏览器走代理，签到后关闭代理。每次 runner 生成的账号和配置只保留在忽略目录 `.cache/nodeseek/warp/`，权限为私有，不上传日志或缓存凭据。
+
+日志会分别验证 `WARP SOCKS5 proxy verified` 和 `浏览器 WARP 验证通过 (warp=on/plus)`，后者用于防止“curl 已换出口，浏览器却仍然直连”。内置 WARP 建连或浏览器验证失败会报错停止两站签到，不会静默回退到原 IP；linux.sb 仍独立执行。最终是否签到成功，以各站的实际领取结果为准。
+
+Cloudflare 挑战超时不等于账号封禁，也不能单凭它认定 Cookie 过期。脚本区分挑战超时、明确的 IP/WAF 拦截和登录失效，不再反复在同一个挑战页尝试 Cookie 注入。WARP 可用于替换 Actions 出口，但不能保证绕过所有风控，也不能修复失效 Cookie 或账号限制。
+
+需要关闭内置 WARP 时，在 Settings -> Secrets and variables -> Actions -> Variables 添加 `NS_WARP=false` 即可，无需重新获取 Cookie。自备代理则配置 Secret `NS_PROXY`。
 
 ### 关于多站点签到
 
@@ -103,6 +115,8 @@ NodeSeek 每日任务
 5. 可选：配置多站签到 `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE`（不配置则只签 NodeSeek 一站；linux.sb 多账号用 `&` 分隔；linux.sb 可另配 `LINUXSB_ACCOUNT`（JSON 账号密码）作 cookie 失效时的自动登录兜底）
 6. 可选：添加通知渠道的 Secrets（渠道与环境变量清单见仓库根目录 README「通知渠道」），workflow 已预置全部通知变量，未添加的自动跳过
 7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
+
+手动运行时勾选 `nodeseek_only`，可只验证 NodeSeek / DeepFlood，自动关闭评论和加鸡腿，不运行 linux.sb。维护时也可修改 `.github/nodeseek-checkin.trigger` 并以包含 `[nodeseek-checkin]` 的提交推送到 `main`，触发同样的两站专用签到验证；其他代码提交不会额外触发正式签到。
 
 `NS_EXTRA_TASKS` 和 `NS_RANDOM` 这类非敏感开关既可以放在 Variables 也可以放在 Secrets，workflow 会优先取 Variables。放在 Variables 的好处是能在页面上直接看到当前值。
 
