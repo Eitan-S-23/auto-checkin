@@ -27,6 +27,7 @@
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同。同样建议整段复制（含 `session`）
 - `NS_WARP`: Actions 仓库 Variable，默认启用 WARP。设为 `false` 或 `0` 可恢复直连；无需配置 WARP 密钥或在本机安装 VPN
 - `NS_PROXY`: 可选的浏览器代理，例如 `socks5://127.0.0.1:40000`。Actions 中作为 Secret 配置后会替代内置 WARP；支持 HTTP、HTTPS、SOCKS5，暂不支持用户名密码认证。只影响 NodeSeek / DeepFlood，不影响 linux.sb、GLaDOS 或通知
+- `NS_VERIFY_ONLY`: 设为 `1` 时仅验证网络与登录态，不领取奖励、不评论、不加鸡腿、不推送。Actions 中可直接勾选 `verify_only`，同时跳过 linux.sb
 - `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起会**间歇性**开启 Cloudflare 托管挑战（同一出口 IP 可能上一轮 403、下一轮 200），脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
 - `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；Cookie 缺失或失效时自动用浏览器登录（算术题验证码由脚本解出填写，PoW 由页面 JS 计算），登录成功当场在同一浏览器会话内继续签到，无需手动换 cookie
 - `LINUXSB_FORCE_BROWSER`: 置 `1` 时 linux.sb 跳过 requests 探测直接走浏览器通道（可选）。用于站点长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
@@ -117,6 +118,8 @@ NodeSeek 每日任务
 7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
 
 手动运行时勾选 `nodeseek_only`，可只验证 NodeSeek / DeepFlood，自动关闭评论和加鸡腿，不运行 linux.sb。维护时也可修改 `.github/nodeseek-checkin.trigger` 并以包含 `[nodeseek-checkin]` 的提交推送到 `main`，触发同样的两站专用签到验证；其他代码提交不会额外触发正式签到。
+
+已经签到过、只想确认出口和登录态时，勾选 `verify_only`；通过推送触发时，提交信息同时包含 `[nodeseek-checkin]` 和 `[nodeseek-verify]` 即使用同样的只读模式。
 
 `NS_EXTRA_TASKS` 和 `NS_RANDOM` 这类非敏感开关既可以放在 Variables 也可以放在 Secrets，workflow 会优先取 Variables。放在 Variables 的好处是能在页面上直接看到当前值。
 

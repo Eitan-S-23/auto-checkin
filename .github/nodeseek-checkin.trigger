@@ -1,1 +1,1 @@
-Scoped WARP check-in verification: 2026-11-18, attempt 1.
+Scoped WARP network/login verification only: 2026-11-18, attempt 2.

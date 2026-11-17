@@ -394,6 +394,28 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("Cloudflare 挑战", mocks["send"].call_args.args[1])
         self.assertNotIn("cookie 注入失败", mocks["send"].call_args.args[1])
 
+    def test_verify_only_checks_login_without_signing_commenting_or_notifying(self):
+        patches = self._patch_run_env(fetch_account_summary=mock.patch.object(
+            daily, "fetch_account_summary", return_value={"level": "1"}))
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(daily.os.environ, {"NS_VERIFY_ONLY": "1"}))
+            stack.enter_context(mock.patch.object(daily, "extra_tasks_enabled", True))
+            mocks = {key: stack.enter_context(patcher) for key, patcher in patches.items()}
+            self.assertEqual(daily.run(), 0)
+        mocks["fetch_account_summary"].assert_called_once()
+        mocks["click_sign_icon"].assert_not_called()
+        mocks["nodeseek_comment"].assert_not_called()
+        mocks["send"].assert_not_called()
+
+    def test_verify_only_fails_if_login_is_unconfirmed_and_does_not_notify(self):
+        patches = self._patch_run_env()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(daily.os.environ, {"NS_VERIFY_ONLY": "1"}))
+            mocks = {key: stack.enter_context(patcher) for key, patcher in patches.items()}
+            self.assertEqual(daily.run(), 1)
+        mocks["click_sign_icon"].assert_not_called()
+        mocks["send"].assert_not_called()
+
 
 class ShouldSkipCookieTestCase(unittest.TestCase):
     """校验 cookie 过滤：环境绑定与统计类 cookie 必须跳过，登录态必须保留。"""

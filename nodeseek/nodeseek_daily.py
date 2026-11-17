@@ -1077,18 +1077,23 @@ def run():
     返回进程退出码：全部签到成功为 0，否则为 1。
     """
     print("开始执行每日任务...")
+    verify_only = env_bool("NS_VERIFY_ONLY")
+    if verify_only:
+        print("仅验证网络和登录态，不签到、不执行附加任务、不推送", flush=True)
     # 记录任务启动时刻，作为通知顶部时间，早于各站签到时间，符合直觉的时间轴顺序
     task_started_at = time.strftime('%Y-%m-%d %H:%M:%S')
     sites = load_sites()
     if not sites:
-        notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）", scope="NODESEEK")
+        if not verify_only:
+            notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）", scope="NODESEEK")
         return 1
 
     # 多站点共用同一个浏览器实例，避免重复启动 Chrome
     driver = create_driver()
     if not driver:
         print("浏览器初始化失败")
-        notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境", scope="NODESEEK")
+        if not verify_only:
+            notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境", scope="NODESEEK")
         return 1
 
     site_results = []
@@ -1130,15 +1135,19 @@ def run():
                 print(f"[{site.name}] 线索: cookie 串里没有 session 字段（HttpOnly 项），"
                       f"粘贴可能不完整；若确认已整段复制，则是 cookie 已失效需重新登录", flush=True)
 
-        # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
-        if extra_tasks_enabled:
-            print(f"[{site.name}] NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
-            comment_stats = nodeseek_comment(driver, site)
-        else:
-            print(f"[{site.name}] NS_EXTRA_TASKS 未开启，仅执行签到")
+        if verify_only:
             comment_stats = None
-
-        sign_result = click_sign_icon(driver, site, logged_in=logged_in)
+            detail = "网络与登录态验证通过（未执行签到）" if logged_in else "未通过网络/登录态验证（未执行签到）"
+            sign_result = {"success": logged_in, "detail": detail}
+        else:
+            # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
+            if extra_tasks_enabled:
+                print(f"[{site.name}] NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
+                comment_stats = nodeseek_comment(driver, site)
+            else:
+                print(f"[{site.name}] NS_EXTRA_TASKS 未开启，仅执行签到")
+                comment_stats = None
+            sign_result = click_sign_icon(driver, site, logged_in=logged_in)
         print(f"[{site.name}] {sign_result['detail']}", flush=True)
 
         site_results.append((site, sign_result, comment_stats, account_summary, started_at))
@@ -1152,7 +1161,8 @@ def run():
 
     all_success = all(r[1]["success"] for r in site_results)
     title = "NodeSeek 每日任务" + ("" if all_success else "（签到异常）")
-    notify.send(title, build_notify_content(site_results, task_started_at), scope="NODESEEK")
+    if not verify_only:
+        notify.send(title, build_notify_content(site_results, task_started_at), scope="NODESEEK")
     return 0 if all_success else 1
 
 
@@ -1164,7 +1174,8 @@ def main():
         # run 内部已对已知失败路径做了处理，这里只兜底真正未捕获的异常
         print("脚本发生未预期异常:")
         traceback.print_exc()
-        notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查", scope="NODESEEK")
+        if not env_bool("NS_VERIFY_ONLY"):
+            notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查", scope="NODESEEK")
         return 1
 
 
