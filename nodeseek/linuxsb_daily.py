@@ -42,6 +42,7 @@ import time
 import traceback
 from html import unescape
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 import requests
 from browser_proxy import normalize_browser_proxy
@@ -127,11 +128,14 @@ class _OverviewDiagnostics(HTMLParser):
         super().__init__()
         self.stack = []
         self.nodes = []
+        self.classes = set()
 
     def handle_starttag(self, tag, attrs):
         if tag not in ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"):
             classes = dict(attrs).get("class", "")
             classes = re.sub(r"[^A-Za-z0-9_ .-]", "", classes)[:100]
+            if classes:
+                self.classes.add(classes)
             self.stack.append((tag, classes))
 
     def handle_endtag(self, tag):
@@ -159,7 +163,11 @@ def log_overview_diagnostics(driver):
     errors = sorted(set(re.findall(r"\bERR_[A-Z_]+\b", html)))
     title = (driver.title or "").strip()
     title = title if title in ("滑动验证", "linux.sb", "烧饼社区", "Just a moment...") else "other"
-    print(f"[linux.sb] 概览诊断：标题={title}；页面长度={len(html)}；网络错误={errors}")
+    path = urlsplit(driver.current_url or "").path
+    path = path if path in ("/daily_checkin", "/login", "/user_review_login_email") else "other"
+    markers = sorted(set(re.findall(r"邮箱|确认|登录|人机|安全验证|滑块|禁止|拒绝|Forbidden|Access denied|403|502", html)))
+    print(f"[linux.sb] 概览诊断：路径={path}；标题={title}；页面长度={len(html)}；网络错误={errors}；页面标记={markers}")
+    print(f"[linux.sb] 概览样式结构：{sorted(parser.classes)[:20]}")
     for path, value in parser.nodes:
         print(f"[linux.sb] 概览字段结构：{path} -> {value}")
 
@@ -169,6 +177,38 @@ def is_slider_verification_page(html):
         "slideBox" in html and "拖动滑块验证" in html
         and bool(re.search(r"\bid\s*=\s*['\"]slider['\"]", html))
     )
+
+
+def complete_slider_verification(driver, timeout=30):
+    """Drag the site's actual verification control and await its own navigation."""
+    try:
+        from selenium.webdriver.common.action_chains import ActionChains
+
+        slider = driver.execute_script(
+            "const track = document.querySelector('#slider');"
+            "const handle = document.querySelector('#slider .handler');"
+            "return track && handle ? {handle: handle, distance: Math.floor(track.clientWidth - handle.offsetWidth) + 4} : null;"
+        )
+        if not isinstance(slider, dict) or slider.get("distance", 0) <= 0:
+            return False
+        actions = ActionChains(driver).move_to_element(slider["handle"]).click_and_hold().pause(0.15)
+        distance = slider["distance"]
+        moved = 0
+        for step in range(1, 9):
+            target = round(distance * step / 8)
+            actions.move_by_offset(target - moved, 0).pause(0.1)
+            moved = target
+        actions.release().perform()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not is_slider_verification_page(driver.page_source or ""):
+                print("[linux.sb] 站点滑动验证已通过")
+                return True
+            time.sleep(0.5)
+        print("[linux.sb] 站点滑动验证未通过，不继续提交签到")
+    except Exception as error:
+        print(f"[linux.sb] 滑动验证操作失败：{type(error).__name__}")
+    return False
 
 
 def verify_browser_warp(driver):
@@ -422,19 +462,31 @@ def wait_for_cloudflare(driver, timeout=120):
     _browser_with_retry 拉开间隔重开浏览器再试——间隔够长才可能碰上挑战松开的
     窗口。
     """
-    if not is_cloudflare_challenge(driver):
-        return True
-
-    print(f"[linux.sb] 检测到 Cloudflare 挑战页，最多等待 {timeout} 秒…")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(3)
-        if not is_cloudflare_challenge(driver):
+    deadline = time.monotonic() + timeout
+    slider_attempted = False
+    cf_seen = False
+    while True:
+        if is_cloudflare_challenge(driver):
+            if not cf_seen:
+                print(f"[linux.sb] 检测到 Cloudflare 挑战页，最多等待 {timeout} 秒…")
+                cf_seen = True
+            if time.monotonic() >= deadline:
+                print("[linux.sb] Cloudflare 挑战在超时内未通过")
+                return False
+            time.sleep(3)
+            continue
+        if is_slider_verification_page(driver.page_source or ""):
+            remaining = deadline - time.monotonic()
+            if slider_attempted or remaining <= 0:
+                return False
+            slider_attempted = True
+            print("[linux.sb] 检测到站点滑动验证，操作页面原生滑块")
+            if not complete_slider_verification(driver, timeout=min(30, remaining)):
+                return False
+            continue
+        if cf_seen:
             print("[linux.sb] Cloudflare 挑战已通过")
-            return True
-
-    print("[linux.sb] Cloudflare 挑战在超时内未通过")
-    return False
+        return True
 
 
 def wait_dom_ready(driver, selector, timeout=30, required=True):
@@ -489,7 +541,7 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
     driver.get(CHECKIN_URL)
     stage.set("等待签到页通过 Cloudflare")
     if not wait_for_cloudflare(driver):
-        raise PageVerificationRequired("签到页 Cloudflare 验证未通过，未提交签到")
+        raise PageVerificationRequired("签到页验证（Cloudflare/滑动验证）未通过，未提交签到")
     if is_slider_verification_page(driver.page_source or ""):
         raise PageVerificationRequired("签到页被滑动验证拦截，未提交签到")
     # 先判 URL 再等 DOM：未登录访问 /daily_checkin 会被 302 到 /login（实测），
@@ -568,7 +620,7 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
     stage.set("刷新签到页提取概览")
     driver.refresh()
     if not wait_for_cloudflare(driver):
-        lines.append("概览信息: Cloudflare 验证未通过；签到已完成，不重复提交")
+        lines.append("概览信息: 页面验证（Cloudflare/滑动验证）未通过；签到已完成，不重复提交")
         return lines, None
     if is_slider_verification_page(driver.page_source or ""):
         lines.append("概览信息: 刷新被滑动验证拦截；签到已完成，不重复提交")

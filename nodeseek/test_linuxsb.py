@@ -1123,7 +1123,7 @@ class CheckinInBrowserTestCase(unittest.TestCase):
         with self.assertRaisesRegex(daily.PageVerificationRequired, "滑动验证"):
             daily._checkin_in_browser(driver, self._stage())
         self.assertEqual(driver.async_scripts, [])
-        self.assertEqual(driver.dom_queries, [])
+        self.assertNotIn(daily.CHECKIN_PAGE_READY_SELECTOR, driver.dom_queries)
         self.assertEqual(daily.extract_checkin_meta(SLIDER_CHALLENGE_PAGE), [])
 
     def test_overview_only_does_not_post_or_refresh_unchecked_page(self):
@@ -1545,7 +1545,7 @@ class OverviewOnlyTestCase(unittest.TestCase):
                 '<body><div class="stat"><span>5.25K</span><small>烧饼</small></div>'
                 '<a class="user-name">Private User</a><input value="private-token">'
                 '<p>ERR_SOCKS_CONNECTION_FAILED</p></body></html>')
-        driver = mock.Mock(page_source=html, title="Private User")
+        driver = mock.Mock(page_source=html, title="Private User", current_url="https://linux.sb/daily_checkin?token=private-token")
         with mock.patch("sys.stdout", new=__import__("io").StringIO()) as log:
             daily.log_overview_diagnostics(driver)
         text = log.getvalue()
@@ -1592,6 +1592,43 @@ class OverviewOnlyTestCase(unittest.TestCase):
             self.assertEqual(daily.verify_overview(), 1)
         self.assertEqual(browser.call_count, 2)
         notify.assert_not_called()
+
+
+class NativeSliderTestCase(unittest.TestCase):
+    def test_native_slider_is_dragged_to_track_end_without_app_requests(self):
+        driver = mock.Mock(page_source=SLIDER_CHALLENGE_PAGE)
+        handle = object()
+        driver.execute_script.return_value = {"handle": handle, "distance": 280}
+        actions = mock.Mock()
+        actions.move_to_element.return_value = actions
+        actions.click_and_hold.return_value = actions
+        actions.pause.return_value = actions
+        actions.release.return_value = actions
+        actions.perform.side_effect = lambda: setattr(driver, "page_source", PAGE_CHECKED)
+        module = mock.Mock()
+        module.ActionChains.return_value = actions
+        with mock.patch.dict(sys.modules, {"selenium.webdriver.common.action_chains": module}), \
+                mock.patch.object(daily.requests, "post") as post:
+            self.assertTrue(daily.complete_slider_verification(driver))
+        actions.move_to_element.assert_called_once_with(handle)
+        self.assertEqual(sum(call.args[0] for call in actions.move_by_offset.call_args_list), 280)
+        actions.release.assert_called_once()
+        post.assert_not_called()
+
+    def test_failed_native_verification_is_not_a_successful_account_page(self):
+        driver = mock.Mock(page_source=SLIDER_CHALLENGE_PAGE, title="滑动验证")
+        with mock.patch.object(daily, "complete_slider_verification", return_value=False) as drag:
+            self.assertFalse(daily.wait_for_cloudflare(driver))
+        drag.assert_called_once()
+
+    def test_successful_native_verification_returns_to_normal_page(self):
+        driver = mock.Mock(page_source=SLIDER_CHALLENGE_PAGE, title="滑动验证")
+        def complete(*args, **kwargs):
+            driver.page_source = PAGE_CHECKED
+            driver.title = "每日签到"
+            return True
+        with mock.patch.object(daily, "complete_slider_verification", side_effect=complete):
+            self.assertTrue(daily.wait_for_cloudflare(driver))
 
 
 if __name__ == "__main__":
