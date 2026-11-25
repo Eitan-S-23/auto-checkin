@@ -118,7 +118,7 @@ class PageVerificationRequired(RuntimeError):
 
 
 class OverviewUnavailable(RuntimeError):
-    """A verified account page did not provide a current point balance."""
+    """No trustworthy account metadata was available from the response page."""
 
 
 class _OverviewDiagnostics(HTMLParser):
@@ -177,6 +177,14 @@ def is_slider_verification_page(html):
         "slideBox" in html and "拖动滑块验证" in html
         and bool(re.search(r"\bid\s*=\s*['\"]slider['\"]", html))
     )
+
+
+def cloudflare_error_code(html):
+    if "cf-error-footer" not in html:
+        return None
+    text = unescape(re.sub(r"<[^>]+>", " ", html))
+    match = re.search(r"Error\s+code\s*(\d{3,4})\b", text, re.I)
+    return match.group(1) if match else None
 
 
 def complete_slider_verification(driver, timeout=30):
@@ -544,6 +552,9 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
         raise PageVerificationRequired("签到页验证（Cloudflare/滑动验证）未通过，未提交签到")
     if is_slider_verification_page(driver.page_source or ""):
         raise PageVerificationRequired("签到页被滑动验证拦截，未提交签到")
+    error_code = cloudflare_error_code(driver.page_source or "")
+    if error_code:
+        raise OverviewUnavailable(f"Cloudflare 错误页（code={error_code}），未提交签到")
     # 先判 URL 再等 DOM：未登录访问 /daily_checkin 会被 302 到 /login（实测），
     # 登录页永远不会出现签到页元素。顺序反了会白等满超时，且异常退化成普通
     # RuntimeError——run() 就识别不出「Cookie 失效」、走不到账号密码兜底。
@@ -625,6 +636,10 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
     if is_slider_verification_page(driver.page_source or ""):
         lines.append("概览信息: 刷新被滑动验证拦截；签到已完成，不重复提交")
         print("[linux.sb] 签到后刷新被滑动验证拦截，不把验证页当作账号概览")
+        return lines, None
+    error_code = cloudflare_error_code(driver.page_source or "")
+    if error_code:
+        lines.append(f"概览信息: Cloudflare 错误页（code={error_code}）；签到已完成，不重复提交")
         return lines, None
     wait_dom_ready(driver, CHECKIN_PAGE_READY_SELECTOR,
                    timeout=CHECKIN_PAGE_READY_TIMEOUT, required=False)
@@ -1122,7 +1137,7 @@ def extract_checkin_meta(html):
     积分保留页面显示的小数及 K/M 单位，不把缩写值换算成精确整数。
     返回格式：[("当前积分", "5.2K"), ("连续签到", "5 天")]
     """
-    if is_slider_verification_page(html):
+    if is_slider_verification_page(html) or cloudflare_error_code(html):
         return []
     text = unescape(re.sub(r"<[^>]+>", " ", html))
     # <!---- 注释 --> 内容也可能残留数字，先去除注释
@@ -1254,6 +1269,7 @@ def _build_summary(lines, cookie):
     html = ""
     status = None
     final_url = None
+    browser_overview_needed = False
     try:
         response = requests.get(
             CHECKIN_URL, headers=PAGE_HEADERS, cookies=parse_cookies(cookie), timeout=30
@@ -1261,10 +1277,24 @@ def _build_summary(lines, cookie):
         status = response.status_code
         # 跟随重定向后的最终 URL（requests.Response 自带，mock 场景可能缺失）
         final_url = getattr(response, "url", None)
-        if status == 200:
+        browser_overview_needed = is_cf_challenge_response(response)
+        if status == 200 and not browser_overview_needed:
             html = response.text
+            browser_overview_needed = is_slider_verification_page(html)
     except requests.RequestException as exc:
         print(f"[linux.sb] 概览页 GET 异常：{exc}")
+
+    if browser_overview_needed:
+        print("[linux.sb] HTTP 概览被验证拦截，使用浏览器只读补充，不重复签到")
+        try:
+            ok, summary, username = browser_sign_in_with_cookie(cookie, overview_only=True)
+            if ok:
+                lines.extend(summary.splitlines())
+                return "\n".join(lines), username
+        except Exception as error:
+            print(f"[linux.sb] 浏览器只读概览失败：{type(error).__name__}")
+        lines.append("概览信息: 页面验证未通过；签到已完成，不重复提交")
+        return "\n".join(lines), None
 
     username = None
     if html:

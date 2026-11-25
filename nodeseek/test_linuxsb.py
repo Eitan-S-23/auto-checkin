@@ -258,6 +258,29 @@ class SignInAccountTestCase(unittest.TestCase):
         self.assertIn("签到结果: 签到成功（签到成功）", summary)
         self.assertIsNone(username)  # 测试页面无用户名链接
 
+    def test_successful_http_checkin_uses_read_only_browser_for_blocked_overview(self):
+        with mock.patch.object(daily.requests, "get", side_effect=[
+            FakeResponse(text=PAGE_UNCHECKED), FakeResponse(text=SLIDER_CHALLENGE_PAGE),
+        ]), fake_post({"ok": 1}) as post, \
+                mock.patch.object(daily, "browser_sign_in_with_cookie",
+                                  return_value=(True, "积分: 7.9K", None)) as browser:
+            success, summary, _ = daily.sign_in_account("bbs_auth=abc")
+        self.assertTrue(success)
+        self.assertIn("积分: 7.9K", summary)
+        self.assertEqual(post.call_count, 1)
+        browser.assert_called_once_with("bbs_auth=abc", overview_only=True)
+
+    def test_failed_read_only_overview_does_not_replay_successful_http_checkin(self):
+        with mock.patch.object(daily.requests, "get", side_effect=[
+            FakeResponse(text=PAGE_UNCHECKED), FakeResponse(text=SLIDER_CHALLENGE_PAGE),
+        ]), fake_post({"ok": 1}) as post, \
+                mock.patch.object(daily, "browser_sign_in_with_cookie",
+                                  side_effect=daily.PageVerificationRequired("滑动验证")):
+            success, summary, _ = daily.sign_in_account("bbs_auth=abc")
+        self.assertTrue(success)
+        self.assertIn("不重复提交", summary)
+        self.assertEqual(post.call_count, 1)
+
     def test_已签到跳过post(self):
         with fake_get(PAGE_CHECKED) as get_mock, \
              mock.patch.object(daily.requests, "post") as post_mock:
@@ -1117,6 +1140,17 @@ class CheckinInBrowserTestCase(unittest.TestCase):
 
     def _stage(self):
         return daily._Stage("测试")
+
+    def test_cloudflare_error_page_is_not_an_account_page(self):
+        html = ('<html><h1>Error code <span>522</span></h1>'
+                '<div class="cf-error-footer"></div><p>积分：888</p></html>')
+        driver = FakeDriver(html)
+        self.assertEqual(daily.cloudflare_error_code(html), "522")
+        self.assertEqual(daily.extract_checkin_meta(html), [])
+        with self.assertRaisesRegex(daily.OverviewUnavailable, "522"):
+            daily._checkin_in_browser(driver, self._stage(), overview_only=True)
+        self.assertEqual(driver.async_scripts, [])
+        self.assertEqual(driver.dom_queries, [])
 
     def test_slider_verification_is_not_a_checkin_page(self):
         driver = FakeDriver(SLIDER_CHALLENGE_PAGE)

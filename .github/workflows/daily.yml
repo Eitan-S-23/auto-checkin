@@ -60,6 +60,7 @@ jobs:
       # Browser proxies are scoped per site; notifications keep their own routes.
       NS_WARP_ENABLED: ${{ (vars.NS_WARP || 'true') != 'false' && (vars.NS_WARP || 'true') != '0' && '1' || '0' }}
       NS_CUSTOM_PROXY: ${{ secrets.NS_PROXY != '' && '1' || '0' }}
+      LINUXSB_WARP_ENABLED: ${{ ((vars.LINUXSB_WARP || 'false') == 'true' || (vars.LINUXSB_WARP || 'false') == '1') && '1' || '0' }}
       # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
       SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
       SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
@@ -173,7 +174,7 @@ jobs:
 
       - name: Start scoped WARP proxy
         id: warp
-        if: ${{ env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' }}
+        if: ${{ (env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1') || env.LINUXSB_WARP_ENABLED == '1' }}
         run: bash nodeseek/warp_proxy.sh start
 
       - name: Run NodeSeek script
@@ -205,8 +206,8 @@ jobs:
         if: ${{ !cancelled() && steps.deps.outcome == 'success' && github.event_name != 'push' && !inputs.nodeseek_only && !inputs.verify_only }}
         env:
           HOME: ${{ github.workspace }}/.cache/nodeseek/home
-          LINUXSB_PROXY: ${{ secrets.LINUXSB_PROXY || (env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' && 'socks5://127.0.0.1:40000' || '') }}
-          LINUXSB_WARP_REQUIRED: ${{ secrets.LINUXSB_PROXY == '' && env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' && '1' || '0' }}
+          LINUXSB_PROXY: ${{ secrets.LINUXSB_PROXY || (env.LINUXSB_WARP_ENABLED == '1' && 'socks5://127.0.0.1:40000' || '') }}
+          LINUXSB_WARP_REQUIRED: ${{ secrets.LINUXSB_PROXY == '' && env.LINUXSB_WARP_ENABLED == '1' && '1' || '0' }}
           # linux.sb 签到 cookie（可选，配置后三站顺序签到）
           LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
           # 账号密码兜底登录（可选）：cookie 缺失或失效时自动登录，

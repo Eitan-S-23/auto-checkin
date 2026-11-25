@@ -31,7 +31,8 @@
 - `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起会**间歇性**开启 Cloudflare 托管挑战（同一出口 IP 可能上一轮 403、下一轮 200），脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
 - `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；Cookie 缺失或失效时自动用浏览器登录（算术题验证码由脚本解出填写，PoW 由页面 JS 计算），登录成功当场在同一浏览器会话内继续签到，无需手动换 cookie
 - `LINUXSB_FORCE_BROWSER`: 置 `1` 时 linux.sb 跳过 requests 探测直接走浏览器通道（可选）。用于站点长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
-- `LINUXSB_PROXY`: linux.sb 浏览器的显式 HTTP/HTTPS/SOCKS5 代理（可选，不支持认证）。配置后跳过 requests 直连通道；不影响其他站点或通知。Actions 默认复用内置 WARP，也可用同名 Secret 单独覆盖。
+- `LINUXSB_PROXY`: linux.sb 浏览器的显式 HTTP/HTTPS/SOCKS5 代理（可选，不支持认证）。配置后跳过 requests 直连通道；不影响其他站点或通知。Actions 可用同名 Secret 单独配置。
+- `LINUXSB_WARP`: Actions Variable，默认 `false`，显式设 `true` 或 `1` 才让 LinuxSB 使用内置 WARP。2026-11-26 只读对照中，直连完成原生滑块后取得积分，WARP 则返回 Cloudflare 错误页，因此不默认启用；不影响 NodeSeek/DeepFlood 原有 WARP 配置。
 - `LINUXSB_WARP_REQUIRED`: 置 `1` 时，浏览器必须通过 `warp=on/plus` 检查才访问账号；验证失败停止，不静默改为直连。内置 WARP 模式由 workflow 自动设置。
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
@@ -39,13 +40,13 @@
 
 ### WARP 与 IP 风控
 
-Actions 默认使用项目内的用户态 WARP SOCKS5 代理（[wgcf v2.3.1](https://github.com/ViRb3/wgcf/releases/tag/v2.3.1) + [wireproxy v1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)），下载文件校验固定 SHA-256，不使用公开共享私钥、不改系统路由。NodeSeek / DeepFlood / linux.sb 浏览器均可复用内置代理，linux.sb 完成后才关闭代理。每次 runner 生成的账号和配置只保留在忽略目录 `.cache/nodeseek/warp/`，权限为私有，不上传日志或缓存凭据。
+NodeSeek / DeepFlood 的 Actions 默认使用项目内的用户态 WARP SOCKS5 代理（[wgcf v2.3.1](https://github.com/ViRb3/wgcf/releases/tag/v2.3.1) + [wireproxy v1.1.3](https://github.com/windtf/wireproxy/releases/tag/v1.1.3)），下载文件校验固定 SHA-256，不使用公开共享私钥、不改系统路由。LinuxSB 默认直连并处理原生滑块，可通过 `LINUXSB_WARP=true` 选择内置代理，所有站点完成后才关闭代理。每次 runner 生成的账号和配置只保留在忽略目录 `.cache/nodeseek/warp/`，权限为私有，不上传日志或缓存凭据。
 
-日志会分别验证 `WARP SOCKS5 proxy verified` 和各浏览器的 `浏览器 WARP 验证通过 (warp=on/plus)`，后者用于防止“curl 已换出口，浏览器却仍然直连”。内置 WARP 建连或浏览器验证失败会报错停止对应站点签到，不会静默回退到原 IP。配置自备 `NS_PROXY` 时不启动内置 WARP，linux.sb 默认保持原通道，或通过独立 `LINUXSB_PROXY` 指定代理。最终是否签到成功，以各站的实际领取结果为准。
+日志会分别验证 `WARP SOCKS5 proxy verified` 和各浏览器的 `浏览器 WARP 验证通过 (warp=on/plus)`，后者用于防止“curl 已换出口，浏览器却仍然直连”。内置 WARP 建连或浏览器验证失败会报错停止对应站点签到，不会静默回退到原 IP。配置自备 `NS_PROXY` 时 NodeSeek/DeepFlood 使用自备代理；LinuxSB 独立选择直连、`LINUXSB_WARP` 或 `LINUXSB_PROXY`。出口验证通过不代表站点或账号页面可用，最终以各站的实际领取结果和概览读取为准。
 
 Cloudflare 挑战超时不等于账号封禁，也不能单凭它认定 Cookie 过期。脚本区分挑战超时、明确的 IP/WAF 拦截和登录失效，不再反复在同一个挑战页尝试 Cookie 注入。WARP 可用于替换 Actions 出口，但不能保证绕过所有风控，也不能修复失效 Cookie 或账号限制。
 
-需要关闭内置 WARP 时，在 Settings -> Secrets and variables -> Actions -> Variables 添加 `NS_WARP=false` 即可，无需重新获取 Cookie。自备代理则配置 Secret `NS_PROXY`。
+需要关闭 NodeSeek/DeepFlood 的内置 WARP 时，在 Settings -> Secrets and variables -> Actions -> Variables 添加 `NS_WARP=false` 即可，无需重新获取 Cookie。LinuxSB 的 `LINUXSB_WARP` 独立控制，默认关闭。自备 NodeSeek/DeepFlood 代理则配置 Secret `NS_PROXY`。
 
 ### 关于多站点签到
 
@@ -71,9 +72,9 @@ DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构
 
 LinuxSB 的积分显示保留网页中的小数和 `K` / `M` 单位（如 `5K`、`5.25K`），仍兼容 `1,234` 等原格式。缩写积分不擅自换算成精确整数，签到奖励与累计积分仍分开展示。
 
-LinuxSB 的“滑动验证”页面不是账号概览，不能把它当成模板差异或 Cookie 过期。访问时仍被验证拦截会明确报告；签到成功后的刷新若被拦截，只报告概览获取失败，不重新提交签到。
+LinuxSB 的“滑动验证”页面不是账号概览，不能把它当成模板差异或 Cookie 过期。浏览器会通过真实鼠标动作操作页面的原生滑块，等待站点自身完成验证；未通过则停止。Cloudflare 错误页也单独识别，不当作积分页面。签到成功后的刷新若仍被拦截，只报告概览获取失败，不重新提交签到。
 
-维护时可运行 `python -B nodeseek/linuxsb_daily.py --overview-only`，只使用现有 Cookie 读取当前积分，不签到、不请求账号密码登录、不推送通知。推送含 `[linuxsb-verify]` 的提交时，`nodeseek-tests` 会在离线回归后追加同一运行器的直连/WARP 只读对照；普通代码推送仍仅运行离线测试，不额外签到。
+维护时可运行 `python -B nodeseek/linuxsb_daily.py --overview-only`，只使用现有 Cookie 读取当前积分，不签到、不请求账号密码登录、不推送通知。推送含 `[linuxsb-verify]` 的提交时，`nodeseek-tests` 会在离线回归后追加同一运行器的直连/WARP 只读对照，并要求选中的通道实际读到积分；普通代码推送仍仅运行离线测试，不额外签到。对照步骤使用 `continue-on-error` 时，应核对原始日志与 `steps.*.outcome`，不能把被覆盖的成功状态当作读取成功。
 
 通知内容示例（多站签到，实际推送格式）：
 
