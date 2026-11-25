@@ -121,6 +121,10 @@ class OverviewUnavailable(RuntimeError):
     """No trustworthy account metadata was available from the response page."""
 
 
+class CheckinOutcomeUnknown(RuntimeError):
+    """A submitted check-in has no confirmed response; never blindly replay it."""
+
+
 class _OverviewDiagnostics(HTMLParser):
     """Keep only numeric/label nodes and CSS structure, never account or token data."""
 
@@ -598,19 +602,27 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
                 f"未取到 bbs_csrf cookie（{bbs_csrf_cookie!r}）且无备用令牌，"
                 "Cookie 可能已失效"
             )
-        result = driver.execute_async_script(
-            "const done = arguments[arguments.length - 1];"
-            "const csrf = arguments[0];"
-            "fetch('/daily_checkin', {"
-            "  method: 'POST',"
-            "  headers: {"
-            "    'Content-Type': 'application/x-www-form-urlencoded',"
-            "    'X-Requested-With': 'XMLHttpRequest'"
-            "  },"
-            "  body: '_csrf=' + encodeURIComponent(csrf)"
-            "}).then(r => r.json()).then(done).catch(e => done({ok: 0, message: String(e)}));",
-            csrf_to_submit,
-        )
+        try:
+            result = driver.execute_async_script(
+                "const done = arguments[arguments.length - 1];"
+                "const csrf = arguments[0];"
+                "fetch('/daily_checkin', {"
+                "  method: 'POST',"
+                "  headers: {"
+                "    'Content-Type': 'application/x-www-form-urlencoded',"
+                "    'X-Requested-With': 'XMLHttpRequest'"
+                "  },"
+                "  body: '_csrf=' + encodeURIComponent(csrf)"
+                "}).then(r => r.json()).then(done)"
+                ".catch(() => done({outcome_unknown: true}));",
+                csrf_to_submit,
+            )
+        except Exception as exc:
+            raise CheckinOutcomeUnknown(
+                f"签到请求未取得确认（{type(exc).__name__}）；不自动重复提交，请先核对今日签到状态"
+            ) from None
+        if not isinstance(result, dict) or result.get("outcome_unknown"):
+            raise CheckinOutcomeUnknown("签到请求未取得有效响应；不自动重复提交，请先核对今日签到状态")
         message = (result or {}).get("message", "") or ""
         if (result or {}).get("ok") in (1, True, "1", "true"):
             lines.append(f"签到结果: 签到成功{f'（{message}）' if message else ''}")
@@ -627,7 +639,17 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
             raise CheckinRejected(f"签到失败：{message}{hint}")
 
     # 刷新签到页提取用户名/积分/连续签到概览。签到已经完成，这一步只为补充展示
-    # 信息，同样不因页面形态对不上而失败（required=False）
+    # 信息，任何读取异常都不能触发签到重试。
+    try:
+        return _browser_checkin_overview(driver, stage, lines, bonus_from_response)
+    except Exception as exc:
+        lines.append(f"概览信息: 读取异常（{type(exc).__name__}）；签到已完成，不重复提交")
+        print(f"[linux.sb] 签到已完成，概览读取异常（{type(exc).__name__}），不重复提交")
+        return lines, None
+
+
+def _browser_checkin_overview(driver, stage, lines, bonus_from_response):
+    """Read post-check-in metadata without ever submitting another check-in."""
     stage.set("刷新签到页提取概览")
     driver.refresh()
     if not wait_for_cloudflare(driver):
@@ -746,7 +768,7 @@ def browser_sign_in_with_cookie(cookie, *, overview_only=False):
     except CookieExpired:
         # Cookie 本身失效：交给 run() 决定是否转账号密码兜底，不在此吞掉
         raise
-    except (PageVerificationRequired, OverviewUnavailable):
+    except (PageVerificationRequired, OverviewUnavailable, CheckinOutcomeUnknown):
         raise
     except Exception as exc:
         if overview_only:
@@ -897,9 +919,8 @@ def browser_sign_in(creds):
     except CheckinRejected as exc:
         # 服务端明确拒绝签到属业务结果，按失败上报即可，不必重开浏览器重试
         return False, str(exc), None
-    except LoginVerificationRequired:
-        # 邮箱验证只能人工完成，重开浏览器只会再触发一封确认邮件：直接上抛，
-        # 也不走 _browser_failure 包装（URL 已足够定位，无需再 dump 页面）
+    except (LoginVerificationRequired, CheckinOutcomeUnknown):
+        # 人工邮箱验证或签到结果不确定时，保留异常类型，禁止重新登录并签到。
         raise
     except Exception as exc:
         raise _browser_failure(driver, stage, exc, "登录/签到") from exc
@@ -927,6 +948,7 @@ def _browser_with_retry(action, func, arg, max_attempts=_BROWSER_LOGIN_MAX_ATTEM
     由调用方转去账号密码兜底登录才有意义。
     LoginVerificationRequired 同样直接上抛：邮箱验证只能人工完成，重试只会
     再触发一封确认邮件，还可能加重风控。
+    CheckinOutcomeUnknown 不重试：POST 可能已成功，必须先只读核对签到状态。
     每次尝试打印动作名与序号，便于从日志分辨是「一次都没成」还是「第 N 次才成」。
     """
     last_error = None
@@ -935,7 +957,7 @@ def _browser_with_retry(action, func, arg, max_attempts=_BROWSER_LOGIN_MAX_ATTEM
             if attempt > 1:
                 print(f"[linux.sb] 浏览器{action}第 {attempt} 次重试（共 {max_attempts} 次）")
             return func(arg)
-        except (CookieExpired, LoginVerificationRequired):
+        except (CookieExpired, LoginVerificationRequired, CheckinOutcomeUnknown):
             raise
         except Exception as exc:
             last_error = exc

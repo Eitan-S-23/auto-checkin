@@ -74,6 +74,8 @@ LinuxSB 的积分显示保留网页中的小数和 `K` / `M` 单位（如 `5K`�
 
 LinuxSB 的“滑动验证”页面不是账号概览，不能把它当成模板差异或 Cookie 过期。浏览器会通过真实鼠标动作操作页面的原生滑块，等待站点自身完成验证；未通过则停止。Cloudflare 错误页也单独识别，不当作积分页面。签到成功后的刷新若仍被拦截，只报告概览获取失败，不重新提交签到。
 
+签到提交后若未取得有效响应或发生超时，脚本不会盲目重试 POST 或重新登录；应先核对当天签到状态。已明确成功的签到不会因刷新或概览读取异常被改判失败或重新提交。
+
 维护时可运行 `python -B nodeseek/linuxsb_daily.py --overview-only`，只使用现有 Cookie 读取当前积分，不签到、不请求账号密码登录、不推送通知。推送含 `[linuxsb-verify]` 的提交时，`nodeseek-tests` 会在离线回归后追加同一运行器的直连/WARP 只读对照，并要求选中的通道实际读到积分；普通代码推送仍仅运行离线测试，不额外签到。对照步骤使用 `continue-on-error` 时，应核对原始日志与 `steps.*.outcome`，不能把被覆盖的成功状态当作读取成功。
 
 通知内容示例（多站签到，实际推送格式）：
@@ -125,6 +127,8 @@ NodeSeek 每日任务
 7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
 
 手动运行时勾选 `nodeseek_only`，可只验证 NodeSeek / DeepFlood，自动关闭评论和加鸡腿，不运行 linux.sb。维护时也可修改 `.github/nodeseek-checkin.trigger` 并以包含 `[nodeseek-checkin]` 的提交推送到 `main`，触发同样的两站专用签到验证；其他代码提交不会额外触发正式签到。
+
+只需要 LinuxSB 正式签到时，勾选 `linuxsb_only`，不要同时勾选 `nodeseek_only` 或 `verify_only`。维护时也可修改 `.github/linuxsb-checkin.trigger`，以包含 `[linuxsb-checkin]` 的提交推送到 `main`。此入口强制使用浏览器，跳过 NodeSeek / DeepFlood 及其 WARP 启动，仍遵守 LinuxSB 自己的代理配置；未配置 LinuxSB 凭据或实际签到失败时 Action 失败，不把只读积分测试当成签到。每日定时任务保持原有的多站执行方式。
 
 已经签到过、只想确认出口和登录态时，勾选 `verify_only`；通过推送触发时，提交信息同时包含 `[nodeseek-checkin]` 和 `[nodeseek-verify]` 即使用同样的只读模式。
 

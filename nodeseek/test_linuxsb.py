@@ -714,6 +714,13 @@ class BrowserRetryTestCase(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "连续 2 次失败"):
             daily._browser_with_retry("测试", func, "x", max_attempts=2)
 
+    def test_unknown_checkin_outcome_is_not_retried(self):
+        func = mock.Mock(side_effect=daily.CheckinOutcomeUnknown("未取得提交确认"))
+        with self.assertRaises(daily.CheckinOutcomeUnknown):
+            daily._browser_with_retry("签到", func, "cookie", max_attempts=3)
+        func.assert_called_once_with("cookie")
+        daily.time.sleep.assert_not_called()
+
 
 class RunCloudflareFallbackTestCase(unittest.TestCase):
     """run() 在 Cloudflare 挑战下改走浏览器通道的流程测试"""
@@ -1185,6 +1192,41 @@ class CheckinInBrowserTestCase(unittest.TestCase):
         self.assertEqual(len(driver.async_scripts), 1)
         self.assertIsNone(username)
 
+    def test_refresh_exception_preserves_success_without_replaying_checkin(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED,
+                            cookies=[{"name": "bbs_csrf", "value": "livecsrf"}],
+                            script_result={"ok": 1, "bonus": 76})
+        with mock.patch.object(driver, "refresh", side_effect=TimeoutError("private-value")):
+            lines, username = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("签到成功", lines[0])
+        self.assertIn("本次签到获得: 76 积分", lines)
+        self.assertTrue(any("签到已完成，不重复提交" in line for line in lines))
+        self.assertNotIn("private-value", "\n".join(lines))
+        self.assertEqual(len(driver.async_scripts), 1)
+        self.assertIsNone(username)
+
+    def test_checkin_timeout_is_not_retried(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED,
+                            cookies=[{"name": "bbs_csrf", "value": "livecsrf"}])
+        with mock.patch.object(driver, "execute_async_script",
+                               side_effect=TimeoutError("private-value")) as submit:
+            with self.assertRaises(daily.CheckinOutcomeUnknown) as error:
+                daily._browser_with_retry("签到", lambda d: daily._checkin_in_browser(d, self._stage()), driver)
+        submit.assert_called_once()
+        self.assertNotIn("private-value", str(error.exception))
+        self.assertEqual(driver.refreshed, 0)
+
+    def test_invalid_checkin_response_is_not_treated_as_success(self):
+        for result in (None, [], "unexpected", {"outcome_unknown": True}):
+            with self.subTest(result=result):
+                driver = FakeDriver(BROWSER_PAGE_UNCHECKED,
+                                    cookies=[{"name": "bbs_csrf", "value": "livecsrf"}],
+                                    script_result=result)
+                with self.assertRaises(daily.CheckinOutcomeUnknown):
+                    daily._checkin_in_browser(driver, self._stage())
+                self.assertEqual(len(driver.async_scripts), 1)
+                self.assertEqual(driver.refreshed, 0)
+
     def test_重定向到登录页立即判定cookie失效(self):
         """未登录时 /daily_checkin 会 302 到 /login：必须先判 URL，不白等 DOM 超时"""
         driver = FakeDriver('<html><title>登录</title><body>登录</body></html>',
@@ -1309,6 +1351,16 @@ class BrowserSignInJsFormTestCase(unittest.TestCase):
         self.assertIn("今日已签到", summary)
         self.assertEqual(username, "烧饼爱好者")
 
+    def test_login_route_preserves_unknown_checkin_outcome(self):
+        driver = FakeDriver(LOGIN_PAGE, captcha_question="9 × 7 = ?",
+                            login_csrf="logincsrf", after_login_page=BROWSER_PAGE_UNCHECKED)
+        with mock.patch.object(daily, "create_driver", return_value=driver), \
+                mock.patch.object(daily.time, "sleep"), \
+                mock.patch.object(daily, "_checkin_in_browser",
+                                  side_effect=daily.CheckinOutcomeUnknown("未取得提交确认")):
+            with self.assertRaises(daily.CheckinOutcomeUnknown):
+                daily.browser_sign_in(dict(self.CREDS))
+
     def test_题面取不到时按解析失败上报(self):
         """题面为空（模板改版）时 solve_captcha_question 抛错，失败信息带阶段与 URL"""
         with self.assertRaisesRegex(RuntimeError, r"填写登录表单.*linux\.sb/login"):
@@ -1396,6 +1448,14 @@ class BrowserCookieInjectTestCase(unittest.TestCase):
         injected_names = [c["name"] for c in driver.added_cookies]
         self.assertEqual(injected_names, ["bbs_auth", "bbs_csrf", "__recent_forums"])
         self.assertIn("今日已签到", summary)
+
+    def test_cookie_route_preserves_unknown_checkin_outcome(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED)
+        with mock.patch.object(daily, "create_driver", return_value=driver), \
+                mock.patch.object(daily, "_checkin_in_browser",
+                                  side_effect=daily.CheckinOutcomeUnknown("未取得提交确认")):
+            with self.assertRaises(daily.CheckinOutcomeUnknown):
+                daily.browser_sign_in_with_cookie("bbs_auth=abc")
 
     def test_当前页不在目标域时先回首页再注入(self):
         """浏览器停在非 linux.sb 页面（如空白页）时，先重新打开首页再注入，避免 cookie 落错域"""
