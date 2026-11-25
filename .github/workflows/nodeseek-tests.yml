@@ -24,7 +24,7 @@ concurrency:
 jobs:
   tests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: ${{ github.workspace }}
@@ -44,9 +44,10 @@ jobs:
       NS_WARP_REQUIRED: '0'
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
       - name: Prepare project runtime
-        run: mkdir -p "$TMPDIR" "$PYTHONPATH" "$PIP_CACHE_DIR"
+        run: mkdir -p "$TMPDIR" "$PYTHONPATH" "$PIP_CACHE_DIR" .cache/nodeseek/home
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -57,3 +58,28 @@ jobs:
         run: |
           bash -n nodeseek/warp_proxy.sh
           python -B -m unittest discover -s nodeseek -p 'test_*.py' -q
+      - name: Compare LinuxSB direct overview (read-only)
+        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[linuxsb-verify]') }}
+        continue-on-error: true
+        env:
+          HOME: ${{ github.workspace }}/.cache/nodeseek/home
+          LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
+          LINUXSB_PROXY: ''
+          LINUXSB_WARP_REQUIRED: '0'
+          HEADLESS: 'false'
+        run: xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/linuxsb_daily.py --overview-only
+      - name: Start WARP for LinuxSB overview verification
+        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[linuxsb-verify]') }}
+        run: bash nodeseek/warp_proxy.sh start
+      - name: Verify LinuxSB WARP overview (read-only)
+        if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[linuxsb-verify]') }}
+        env:
+          HOME: ${{ github.workspace }}/.cache/nodeseek/home
+          LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
+          LINUXSB_PROXY: socks5://127.0.0.1:40000
+          LINUXSB_WARP_REQUIRED: '1'
+          HEADLESS: 'false'
+        run: xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/linuxsb_daily.py --overview-only
+      - name: Stop WARP after LinuxSB verification
+        if: ${{ always() && steps.checkout.outcome == 'success' && github.event_name == 'push' && contains(github.event.head_commit.message, '[linuxsb-verify]') }}
+        run: bash nodeseek/warp_proxy.sh stop

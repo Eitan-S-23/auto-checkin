@@ -32,6 +32,7 @@ linux.sb（烧饼社区）每日自动签到脚本。
   长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
 - 通知渠道配置见仓库根目录 notify.py（TG_BOT_TOKEN、FEISHU_WEBHOOK、BARK_URL 等，全部可选）
 """
+import argparse
 import json
 import os
 import re
@@ -42,6 +43,7 @@ import traceback
 from html import unescape
 
 import requests
+from browser_proxy import normalize_browser_proxy
 
 # 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
 # 保证从任意工作目录运行脚本都能正确导入
@@ -107,6 +109,39 @@ class CloudflareChallenged(RuntimeError):
 
 class CookieExpired(RuntimeError):
     """浏览器通道注入 Cookie 后仍未取得登录态，说明 Cookie 本身已失效。"""
+
+
+class PageVerificationRequired(RuntimeError):
+    """The native slider is a verification page, not account metadata."""
+
+
+class OverviewUnavailable(RuntimeError):
+    """A verified account page did not provide a current point balance."""
+
+
+def is_slider_verification_page(html):
+    return bool(re.search(r"<title[^>]*>\s*滑动验证\s*</title>", html, re.I)) or (
+        "slideBox" in html and "拖动滑块验证" in html
+        and bool(re.search(r"\bid\s*=\s*['\"]slider['\"]", html))
+    )
+
+
+def verify_browser_warp(driver):
+    """Verify the actual LinuxSB browser route before injecting account cookies."""
+    try:
+        driver.get("https://www.cloudflare.com/cdn-cgi/trace")
+        text = unescape(re.sub(r"<[^>]+>", "\n", driver.page_source or ""))
+        fields = dict(re.findall(r"(?m)^\s*(warp|colo)=([^\r\n]+)$", text))
+        if fields.get("warp") not in ("on", "plus"):
+            print("[linux.sb] 浏览器 WARP 验证失败：trace 未显示 warp=on/plus")
+            return False
+        colo = fields.get("colo", "")
+        colo = colo if re.fullmatch(r"[A-Z]{3}", colo) else "unknown"
+        print(f"[linux.sb] 浏览器 WARP 验证通过 (warp={fields['warp']}, colo={colo})")
+        return True
+    except Exception as error:
+        print(f"[linux.sb] 浏览器 WARP 验证失败：{type(error).__name__}")
+        return False
 
 
 def should_skip_cookie(name):
@@ -274,6 +309,11 @@ def create_driver():
 
     浏览器库在函数内局部导入，保证未安装浏览器依赖时 requests 通道仍可用。
     """
+    proxy = normalize_browser_proxy(os.getenv("LINUXSB_PROXY", ""), "LINUXSB_PROXY")
+    warp_required = env_bool("LINUXSB_WARP_REQUIRED")
+    if warp_required and not proxy:
+        raise ValueError("LINUXSB_WARP_REQUIRED requires LINUXSB_PROXY")
+
     import undetected_chromedriver as uc
 
     options = uc.ChromeOptions()
@@ -285,6 +325,11 @@ def create_driver():
         options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    if proxy:
+        options.add_argument(f"--proxy-server={proxy}")
+        options.add_argument("--disable-quic")
+        options.add_argument("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+        print("[linux.sb] 浏览器使用显式代理，requests 快通道不参与本轮签到")
 
     # runner 预装的 Chrome 往往落后于最新 chromedriver，版本不匹配会直接抛
     # SessionNotCreatedException；显式传入实际大版本号强制取匹配的驱动
@@ -293,7 +338,18 @@ def create_driver():
     if version_main:
         print(f"[linux.sb] 检测到 Chrome 大版本 {version_main}，使用匹配的驱动")
         driver_kwargs["version_main"] = version_main
-    return uc.Chrome(options=options, **driver_kwargs)
+    driver = uc.Chrome(options=options, **driver_kwargs)
+    try:
+        driver.set_page_load_timeout(90)
+        if warp_required and not verify_browser_warp(driver):
+            raise RuntimeError("LinuxSB 浏览器未通过 WARP 验证，停止访问，不静默直连")
+        return driver
+    except Exception:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        raise
 
 
 def is_cloudflare_challenge(driver):
@@ -372,7 +428,7 @@ CHECKIN_PAGE_READY_SELECTOR = ".daily-checkin-wrap, .daily-checkin-page-panel, .
 CHECKIN_PAGE_READY_TIMEOUT = 20
 
 
-def _checkin_in_browser(driver, stage, fallback_csrf=None):
+def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=False):
     """
     在已具备登录态的浏览器会话内完成签到，返回 (结果行列表, 用户名或 None)。
 
@@ -387,7 +443,10 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None):
     stage.set("访问签到页")
     driver.get(CHECKIN_URL)
     stage.set("等待签到页通过 Cloudflare")
-    wait_for_cloudflare(driver)
+    if not wait_for_cloudflare(driver):
+        raise PageVerificationRequired("签到页 Cloudflare 验证未通过，未提交签到")
+    if is_slider_verification_page(driver.page_source or ""):
+        raise PageVerificationRequired("签到页被滑动验证拦截，未提交签到")
     # 先判 URL 再等 DOM：未登录访问 /daily_checkin 会被 302 到 /login（实测），
     # 登录页永远不会出现签到页元素。顺序反了会白等满超时，且异常退化成普通
     # RuntimeError——run() 就识别不出「Cookie 失效」、走不到账号密码兜底。
@@ -396,6 +455,12 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None):
     stage.set("等待签到页加载")
     wait_dom_ready(driver, CHECKIN_PAGE_READY_SELECTOR,
                    timeout=CHECKIN_PAGE_READY_TIMEOUT, required=False)
+
+    if overview_only:
+        meta = extract_checkin_meta(driver.page_source or "")
+        if not any(label in ("当前积分", "积分") for label, _ in meta):
+            raise OverviewUnavailable("只读概览未取得当前积分，页面结构仍需核对")
+        return [f"{label}: {value}" for label, value in meta], None
 
     lines = []
     bonus_from_response = None
@@ -456,7 +521,13 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None):
     # 信息，同样不因页面形态对不上而失败（required=False）
     stage.set("刷新签到页提取概览")
     driver.refresh()
-    wait_for_cloudflare(driver)
+    if not wait_for_cloudflare(driver):
+        lines.append("概览信息: Cloudflare 验证未通过；签到已完成，不重复提交")
+        return lines, None
+    if is_slider_verification_page(driver.page_source or ""):
+        lines.append("概览信息: 刷新被滑动验证拦截；签到已完成，不重复提交")
+        print("[linux.sb] 签到后刷新被滑动验证拦截，不把验证页当作账号概览")
+        return lines, None
     wait_dom_ready(driver, CHECKIN_PAGE_READY_SELECTOR,
                    timeout=CHECKIN_PAGE_READY_TIMEOUT, required=False)
     print(f"[linux.sb] 签到页：URL {driver.current_url}，标题「{driver.title}」")
@@ -495,7 +566,7 @@ def _browser_failure(driver, stage, exc, action):
     return RuntimeError(f"浏览器{action}失败（{stage.name}、URL {live_url}）：{exc}")
 
 
-def browser_sign_in_with_cookie(cookie):
+def browser_sign_in_with_cookie(cookie, *, overview_only=False):
     """
     Cookie 注入浏览器并就地签到，返回 (成功与否, 结果摘要, 用户名或 None)。
 
@@ -551,7 +622,9 @@ def browser_sign_in_with_cookie(cookie):
             # bbs_auth 是该论坛的登录态所在，缺失时后续必然停在未登录页
             print("[linux.sb] 警告：未注入 bbs_auth，登录态很可能不完整")
 
-        lines, username = _checkin_in_browser(driver, stage, fallback_csrf=fallback_csrf)
+        lines, username = _checkin_in_browser(
+            driver, stage, fallback_csrf=fallback_csrf, overview_only=overview_only
+        )
         return True, "\n".join(lines), username
     except CheckinRejected as exc:
         # 服务端明确拒绝（如令牌过期）不是浏览器抽风，重试无意义，如实上报即可
@@ -560,7 +633,13 @@ def browser_sign_in_with_cookie(cookie):
     except CookieExpired:
         # Cookie 本身失效：交给 run() 决定是否转账号密码兜底，不在此吞掉
         raise
+    except (PageVerificationRequired, OverviewUnavailable):
+        raise
     except Exception as exc:
+        if overview_only:
+            raise RuntimeError(
+                f"只读概览失败（{stage.name}）：{type(exc).__name__}；未签到、未登录、未推送"
+            ) from None
         raise _browser_failure(driver, stage, exc, "Cookie 签到") from exc
     finally:
         try:
@@ -945,6 +1024,8 @@ def extract_checkin_meta(html):
     积分保留页面显示的小数及 K/M 单位，不把缩写值换算成精确整数。
     返回格式：[("当前积分", "5.2K"), ("连续签到", "5 天")]
     """
+    if is_slider_verification_page(html):
+        return []
     text = unescape(re.sub(r"<[^>]+>", " ", html))
     # <!---- 注释 --> 内容也可能残留数字，先去除注释
     text = re.sub(r"<!--[\s\S]*?-->", " ", text)
@@ -1133,7 +1214,9 @@ def run():
     # 挑战是间歇性的：同一出口 IP 可能上一轮 403、下一轮 200。没有这个开关，
     # 浏览器通道就只能守着站点开盾的时间窗口才验证得到；站点长期开盾时也可用它
     # 省掉每次必然失败的 requests 探测。
-    force_browser = os.getenv("LINUXSB_FORCE_BROWSER", "") == "1"
+    force_browser = (env_bool("LINUXSB_FORCE_BROWSER")
+                     or bool(os.getenv("LINUXSB_PROXY", "").strip())
+                     or env_bool("LINUXSB_WARP_REQUIRED"))
     if not raw_cookies and not creds:
         # 与 DEEPFLOOD_COOKIE 一致：未配置即视为未启用该站，静默跳过、不算失败
         print("[linux.sb] 未配置 LINUXSB_COOKIE 且未配置 LINUXSB_ACCOUNT，跳过 linux.sb 签到")
@@ -1147,7 +1230,7 @@ def run():
     cookie_list = raw_cookies.split("&") if raw_cookies else [None]
     print(f"[linux.sb] 共 {len(cookie_list)} 个账号开始签到（Cookie 优先，必要时账号密码兜底）")
     if force_browser:
-        print("[linux.sb] LINUXSB_FORCE_BROWSER=1，跳过 requests 探测直接走浏览器通道")
+        print("[linux.sb] 显式代理或强制浏览器已开启，跳过 requests 探测")
 
     results = []
     sections = []
@@ -1253,6 +1336,25 @@ def run():
     return 0 if all_success else 1
 
 
+def verify_overview():
+    """Read account points with existing cookies; never sign, log in, or notify."""
+    raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
+    if not raw_cookies:
+        print("[linux.sb] 只读验证需要 LINUXSB_COOKIE，不使用账号密码登录")
+        return 1
+    print("[linux.sb] 只读概览验证：不签到、不登录、不推送")
+    success = True
+    for idx, cookie in enumerate(raw_cookies.split("&"), 1):
+        try:
+            ok, summary, _ = browser_sign_in_with_cookie(cookie, overview_only=True)
+            success = success and ok
+            print(f"[linux.sb] 账号 {idx} 只读概览：{summary}")
+        except Exception as error:
+            success = False
+            print(f"[linux.sb] 账号 {idx} 只读概览失败：{error}")
+    return 0 if success else 1
+
+
 def main():
     """顶层入口，捕获所有未预期异常，确保通知一定能发出。"""
     try:
@@ -1265,4 +1367,7 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    parser = argparse.ArgumentParser(description="LinuxSB 签到或只读积分概览验证")
+    parser.add_argument("--overview-only", action="store_true", help="只读积分，不签到、不登录、不推送")
+    args = parser.parse_args()
+    exit(verify_overview() if args.overview_only else main())

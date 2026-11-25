@@ -57,7 +57,7 @@ jobs:
       TMPDIR: ${{ github.workspace }}/.cache/ns-t
       TMP: ${{ github.workspace }}/.cache/ns-t
       TEMP: ${{ github.workspace }}/.cache/ns-t
-      # Only the NodeSeek/DeepFlood browser receives a proxy; other clients stay direct.
+      # Browser proxies are scoped per site; notifications keep their own routes.
       NS_WARP_ENABLED: ${{ (vars.NS_WARP || 'true') != 'false' && (vars.NS_WARP || 'true') != '0' && '1' || '0' }}
       NS_CUSTOM_PROXY: ${{ secrets.NS_PROXY != '' && '1' || '0' }}
       # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
@@ -195,10 +195,6 @@ jobs:
         run: |
           xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/nodeseek_daily.py
 
-      - name: Stop scoped WARP proxy
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
-        run: bash nodeseek/warp_proxy.sh stop
-
       # linux.sb（烧饼社区）2026-08 起会间歇性开启 Cloudflare 托管挑战：命中时
       # 非浏览器客户端收到 403 + Cf-Mitigated: challenge（本地住宅 IP、补全浏览器
       # 请求头、curl_cffi 各 impersonate 目标均实测被拦），故脚本被挑战时自动改用
@@ -209,6 +205,8 @@ jobs:
         if: ${{ !cancelled() && steps.deps.outcome == 'success' && github.event_name != 'push' && !inputs.nodeseek_only && !inputs.verify_only }}
         env:
           HOME: ${{ github.workspace }}/.cache/nodeseek/home
+          LINUXSB_PROXY: ${{ secrets.LINUXSB_PROXY || (env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' && 'socks5://127.0.0.1:40000' || '') }}
+          LINUXSB_WARP_REQUIRED: ${{ secrets.LINUXSB_PROXY == '' && env.NS_WARP_ENABLED == '1' && env.NS_CUSTOM_PROXY != '1' && '1' || '0' }}
           # linux.sb 签到 cookie（可选，配置后三站顺序签到）
           LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
           # 账号密码兜底登录（可选）：cookie 缺失或失效时自动登录，
@@ -222,3 +220,7 @@ jobs:
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
           xvfb-run -a --error-file=/dev/stderr --server-args="-screen 0 1920x1080x24" python -B nodeseek/linuxsb_daily.py
+
+      - name: Stop scoped WARP proxy
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        run: bash nodeseek/warp_proxy.sh stop

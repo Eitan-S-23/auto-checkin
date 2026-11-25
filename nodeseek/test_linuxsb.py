@@ -6,6 +6,7 @@ linuxsb_daily 只依赖 requests 与 notify，这里用 mock 替换网络请求�
 """
 import os
 import re
+import sys
 import unittest
 from unittest import mock
 
@@ -39,6 +40,82 @@ CF_CHALLENGE_PAGE = (
     'content="script-src https://challenges.cloudflare.com">'
     '</head><body><div id="cf-wrapper"></div></body></html>'
 )
+SLIDER_CHALLENGE_PAGE = (
+    '<html><head><title>滑动验证</title></head><body>'
+    '<div class="slideBox"><div id="slider">'
+    '<div class="drag_text">拖动滑块验证</div>'
+    '<div class="handler handler_bg"></div></div></div></body></html>'
+)
+
+
+class BrowserProxyTestCase(unittest.TestCase):
+    def _create(self, proxy="", required="0", verified=True):
+        uc = mock.Mock()
+        options = uc.ChromeOptions.return_value
+        driver = uc.Chrome.return_value
+        with mock.patch.dict(os.environ, {
+            "LINUXSB_PROXY": proxy, "LINUXSB_WARP_REQUIRED": required,
+        }), mock.patch.dict(sys.modules, {"undetected_chromedriver": uc}), \
+                mock.patch.object(daily, "detect_chrome_major_version", return_value=157), \
+                mock.patch.object(daily, "verify_browser_warp", return_value=verified) as verify:
+            result = daily.create_driver()
+        arguments = [call.args[0] for call in options.add_argument.call_args_list]
+        return result, driver, arguments, verify
+
+    def test_proxy_is_scoped_to_the_linuxsb_browser(self):
+        result, driver, arguments, verify = self._create("socks5h://127.0.0.1:40000", "1")
+        self.assertIs(result, driver)
+        self.assertIn("--proxy-server=socks5://127.0.0.1:40000", arguments)
+        self.assertIn("--disable-quic", arguments)
+        self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", arguments)
+        verify.assert_called_once_with(driver)
+
+    def test_direct_mode_does_not_require_warp(self):
+        _, _, arguments, verify = self._create()
+        self.assertFalse(any(arg.startswith("--proxy-server=") for arg in arguments))
+        verify.assert_not_called()
+
+    def test_required_warp_without_proxy_does_not_start_chrome(self):
+        with mock.patch.dict(os.environ, {"LINUXSB_PROXY": "", "LINUXSB_WARP_REQUIRED": "1"}), \
+                mock.patch.object(daily, "detect_chrome_major_version") as detect:
+            with self.assertRaisesRegex(ValueError, "LINUXSB_WARP_REQUIRED"):
+                daily.create_driver()
+        detect.assert_not_called()
+
+    def test_browser_that_bypasses_warp_is_closed(self):
+        uc = mock.Mock()
+        with mock.patch.dict(os.environ, {
+            "LINUXSB_PROXY": "socks5://127.0.0.1:40000", "LINUXSB_WARP_REQUIRED": "1",
+        }), mock.patch.dict(sys.modules, {"undetected_chromedriver": uc}), \
+                mock.patch.object(daily, "detect_chrome_major_version", return_value=157), \
+                mock.patch.object(daily, "verify_browser_warp", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "WARP"):
+                daily.create_driver()
+        uc.Chrome.return_value.quit.assert_called_once()
+
+    def test_invalid_proxy_does_not_expose_credentials(self):
+        with mock.patch.dict(os.environ, {
+            "LINUXSB_PROXY": "http://user:private-password@proxy.example:8080",
+        }):
+            with self.assertRaises(ValueError) as error:
+                daily.create_driver()
+        self.assertIn("LINUXSB_PROXY", str(error.exception))
+        self.assertNotIn("private-password", str(error.exception))
+
+    def test_browser_trace_accepts_only_warp_on_or_plus(self):
+        for mode, expected in (("on", True), ("plus", True), ("off", False), ("", False)):
+            driver = mock.Mock(page_source=f"<pre>ip=192.0.2.10\nwarp={mode}\ncolo=LAX\n</pre>")
+            with self.subTest(mode=mode), mock.patch("sys.stdout", new=__import__("io").StringIO()) as log:
+                self.assertEqual(daily.verify_browser_warp(driver), expected)
+            driver.get.assert_called_once_with("https://www.cloudflare.com/cdn-cgi/trace")
+            self.assertNotIn("192.0.2.10", log.getvalue())
+
+    def test_trace_failure_is_not_treated_as_warp_success(self):
+        driver = mock.Mock()
+        driver.get.side_effect = TimeoutError("private-proxy-value")
+        with mock.patch("sys.stdout", new=__import__("io").StringIO()) as log:
+            self.assertFalse(daily.verify_browser_warp(driver))
+        self.assertNotIn("private-proxy-value", log.getvalue())
 
 
 class FakeResponse:
@@ -1041,6 +1118,39 @@ class CheckinInBrowserTestCase(unittest.TestCase):
     def _stage(self):
         return daily._Stage("测试")
 
+    def test_slider_verification_is_not_a_checkin_page(self):
+        driver = FakeDriver(SLIDER_CHALLENGE_PAGE)
+        with self.assertRaisesRegex(daily.PageVerificationRequired, "滑动验证"):
+            daily._checkin_in_browser(driver, self._stage())
+        self.assertEqual(driver.async_scripts, [])
+        self.assertEqual(driver.dom_queries, [])
+        self.assertEqual(daily.extract_checkin_meta(SLIDER_CHALLENGE_PAGE), [])
+
+    def test_overview_only_does_not_post_or_refresh_unchecked_page(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED)
+        lines, username = daily._checkin_in_browser(driver, self._stage(), overview_only=True)
+        self.assertIn("当前积分: 888", lines)
+        self.assertIsNone(username)
+        self.assertEqual(driver.async_scripts, [])
+        self.assertEqual(driver.refreshed, 0)
+
+    def test_overview_only_requires_actual_current_points(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED.replace("当前积分：888", "连续签到 5 天"))
+        with self.assertRaisesRegex(RuntimeError, "当前积分"):
+            daily._checkin_in_browser(driver, self._stage(), overview_only=True)
+        self.assertEqual(driver.async_scripts, [])
+
+    def test_verification_after_success_does_not_replay_checkin(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED,
+                            cookies=[{"name": "bbs_csrf", "value": "livecsrf"}],
+                            script_result={"ok": 1})
+        with mock.patch.object(driver, "refresh", side_effect=lambda: setattr(driver, "page", SLIDER_CHALLENGE_PAGE)):
+            lines, username = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("签到成功", lines[0])
+        self.assertTrue(any("滑动验证" in line for line in lines))
+        self.assertEqual(len(driver.async_scripts), 1)
+        self.assertIsNone(username)
+
     def test_重定向到登录页立即判定cookie失效(self):
         """未登录时 /daily_checkin 会 302 到 /login：必须先判 URL，不白等 DOM 超时"""
         driver = FakeDriver('<html><title>登录</title><body>登录</body></html>',
@@ -1329,6 +1439,20 @@ class RunTestCase(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(send_mock.call_args.args[0], "LinuxSB 每日任务")
 
+    def test_proxy_mode_never_uses_the_direct_requests_channel(self):
+        with mock.patch.dict(os.environ, {
+            "LINUXSB_COOKIE": "bbs_auth=abc", "LINUXSB_PROXY": "socks5://127.0.0.1:40000",
+            "LINUXSB_WARP_REQUIRED": "1", "LINUXSB_FORCE_BROWSER": "",
+        }), mock.patch.object(daily.requests, "get") as get, \
+                mock.patch.object(daily.requests, "post") as post, \
+                mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                                  return_value=(True, "当前积分: 888", None)) as browser, \
+                mock.patch.object(daily.notify, "send"):
+            self.assertEqual(daily.run(), 0)
+        browser.assert_called_once_with("bbs_auth=abc")
+        get.assert_not_called()
+        post.assert_not_called()
+
     def test_通知内容对齐nodeseek分段格式(self):
         """通知含各账号签到时间与概览；【linux.sb】域名不进通知"""
         import os
@@ -1413,6 +1537,46 @@ class RunTestCase(unittest.TestCase):
              mock.patch.object(daily.notify, "send"):
             daily.run()
         self.sleep_mock.assert_called_once()
+
+
+class OverviewOnlyTestCase(unittest.TestCase):
+    def test_read_only_verification_uses_cookies_and_never_logs_in_or_notifies(self):
+        with mock.patch.dict(os.environ, {
+            "LINUXSB_COOKIE": "bbs_auth=first&bbs_auth=second",
+            "LINUXSB_ACCOUNT": '{"username":"private-user","password":"private-password"}',
+        }), mock.patch.object(daily, "browser_sign_in_with_cookie",
+                               return_value=(True, "当前积分: 5.25K", None)) as browser, \
+                mock.patch.object(daily.requests, "post") as post, \
+                mock.patch.object(daily, "browser_sign_in_with_retry") as login, \
+                mock.patch.object(daily.notify, "send") as notify:
+            code = daily.verify_overview()
+        self.assertEqual(code, 0)
+        self.assertEqual(browser.call_args_list, [
+            mock.call("bbs_auth=first", overview_only=True),
+            mock.call("bbs_auth=second", overview_only=True),
+        ])
+        post.assert_not_called()
+        login.assert_not_called()
+        notify.assert_not_called()
+
+    def test_missing_cookie_does_not_use_password_fallback(self):
+        with mock.patch.dict(os.environ, {"LINUXSB_COOKIE": "", "LINUXSB_ACCOUNT": "configured"}), \
+                mock.patch.object(daily, "browser_sign_in_with_cookie") as browser, \
+                mock.patch.object(daily, "load_account_creds") as credentials, \
+                mock.patch.object(daily.notify, "send") as notify:
+            self.assertEqual(daily.verify_overview(), 1)
+        browser.assert_not_called()
+        credentials.assert_not_called()
+        notify.assert_not_called()
+
+    def test_failed_account_does_not_hide_failure_or_skip_other_accounts(self):
+        with mock.patch.dict(os.environ, {"LINUXSB_COOKIE": "first&second"}), \
+                mock.patch.object(daily, "browser_sign_in_with_cookie", side_effect=[
+                    daily.PageVerificationRequired("滑动验证"), (True, "当前积分: 888", None),
+                ]) as browser, mock.patch.object(daily.notify, "send") as notify:
+            self.assertEqual(daily.verify_overview(), 1)
+        self.assertEqual(browser.call_count, 2)
+        notify.assert_not_called()
 
 
 if __name__ == "__main__":

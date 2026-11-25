@@ -5,7 +5,6 @@ Licensed under the MIT License.
 See LICENSE file in the project root for full license information.
 """
 import os
-import ipaddress
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,10 +17,10 @@ import time
 import traceback
 import sys
 import unicodedata
-from urllib.parse import urlsplit
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
+from browser_proxy import normalize_browser_proxy
 
 # 通知模块位于仓库根目录 notify.py，显式加入搜索路径，
 # 保证从任意工作目录运行脚本都能正确导入
@@ -49,33 +48,6 @@ def env_bool(name, default=False):
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in ("true", "1", "yes", "on", "y")
-
-
-def normalize_browser_proxy(raw):
-    """Validate a Chrome proxy endpoint without exposing it in error messages."""
-    raw = (raw or "").strip()
-    if not raw:
-        return ""
-    try:
-        parts = urlsplit(raw)
-        scheme = "socks5" if parts.scheme == "socks5h" else parts.scheme
-        host = parts.hostname
-        port = parts.port
-        if (scheme not in ("http", "https", "socks5") or not host or not port
-                or parts.username is not None or parts.password is not None
-                or parts.path not in ("", "/") or parts.query or parts.fragment
-                or any(char.isspace() for char in raw)):
-            raise ValueError
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host):
-                raise ValueError
-        if ":" in host:
-            host = f"[{host}]"
-        return f"{scheme}://{host}:{port}"
-    except ValueError:
-        raise ValueError("NS_PROXY must be an HTTP(S)/SOCKS5 host:port URL without credentials or paths") from None
 
 
 def verify_browser_warp(driver):
