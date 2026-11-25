@@ -41,6 +41,7 @@ import sys
 import time
 import traceback
 from html import unescape
+from html.parser import HTMLParser
 
 import requests
 from browser_proxy import normalize_browser_proxy
@@ -117,6 +118,50 @@ class PageVerificationRequired(RuntimeError):
 
 class OverviewUnavailable(RuntimeError):
     """A verified account page did not provide a current point balance."""
+
+
+class _OverviewDiagnostics(HTMLParser):
+    """Keep only numeric/label nodes and CSS structure, never account or token data."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.nodes = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"):
+            classes = dict(attrs).get("class", "")
+            classes = re.sub(r"[^A-Za-z0-9_ .-]", "", classes)[:100]
+            self.stack.append((tag, classes))
+
+    def handle_endtag(self, tag):
+        for idx in range(len(self.stack) - 1, -1, -1):
+            if self.stack[idx][0] == tag:
+                del self.stack[idx:]
+                break
+
+    def handle_data(self, data):
+        if any(tag in ("script", "style", "title") for tag, _ in self.stack) or len(self.nodes) >= 24:
+            return
+        data = data.strip()
+        label = re.fullmatch(r"(?:当前|可用|累计|连续|总)?(?:积分|烧饼|余额|签到|天数|天|等级|帖子|主题|回复|评论)[:：]?", data)
+        number = re.fullmatch(r"\d[\d,]*(?:\.\d+)?\s*[KkMm]?(?:\s*天)?", data)
+        if label or number:
+            path = "/".join(tag + ("." + classes.replace(" ", ".") if classes else "")
+                            for tag, classes in self.stack[-5:])
+            self.nodes.append((path, data))
+
+
+def log_overview_diagnostics(driver):
+    html = driver.page_source or ""
+    parser = _OverviewDiagnostics()
+    parser.feed(html)
+    errors = sorted(set(re.findall(r"\bERR_[A-Z_]+\b", html)))
+    title = (driver.title or "").strip()
+    title = title if title in ("滑动验证", "linux.sb", "烧饼社区", "Just a moment...") else "other"
+    print(f"[linux.sb] 概览诊断：标题={title}；页面长度={len(html)}；网络错误={errors}")
+    for path, value in parser.nodes:
+        print(f"[linux.sb] 概览字段结构：{path} -> {value}")
 
 
 def is_slider_verification_page(html):
@@ -459,6 +504,7 @@ def _checkin_in_browser(driver, stage, fallback_csrf=None, *, overview_only=Fals
     if overview_only:
         meta = extract_checkin_meta(driver.page_source or "")
         if not any(label in ("当前积分", "积分") for label, _ in meta):
+            log_overview_diagnostics(driver)
             raise OverviewUnavailable("只读概览未取得当前积分，页面结构仍需核对")
         return [f"{label}: {value}" for label, value in meta], None
 

@@ -1540,6 +1540,21 @@ class RunTestCase(unittest.TestCase):
 
 
 class OverviewOnlyTestCase(unittest.TestCase):
+    def test_diagnostics_keep_css_and_numbers_without_account_or_token_data(self):
+        html = ('<html><head><title>Private User</title><script>secret=123456</script></head>'
+                '<body><div class="stat"><span>5.25K</span><small>烧饼</small></div>'
+                '<a class="user-name">Private User</a><input value="private-token">'
+                '<p>ERR_SOCKS_CONNECTION_FAILED</p></body></html>')
+        driver = mock.Mock(page_source=html, title="Private User")
+        with mock.patch("sys.stdout", new=__import__("io").StringIO()) as log:
+            daily.log_overview_diagnostics(driver)
+        text = log.getvalue()
+        self.assertIn("5.25K", text)
+        self.assertIn("烧饼", text)
+        self.assertIn("ERR_SOCKS_CONNECTION_FAILED", text)
+        for private in ("Private User", "private-token", "123456"):
+            self.assertNotIn(private, text)
+
     def test_read_only_verification_uses_cookies_and_never_logs_in_or_notifies(self):
         with mock.patch.dict(os.environ, {
             "LINUXSB_COOKIE": "bbs_auth=first&bbs_auth=second",
